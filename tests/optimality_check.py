@@ -1,8 +1,10 @@
 """Strict local-minimum certification for solved nonlinear programs."""
 
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
+from functools import cache
 from types import SimpleNamespace
+from typing import Any
 
 import numpy
 import sympy
@@ -46,6 +48,33 @@ class LocalMinimumCertificate:
 
 class LocalMinimumError(AssertionError):
     """Indicate that a point could not be certified as a strict local minimum."""
+
+
+@cache
+def _evaluators(nlp: NonlinearProgram) -> tuple[Callable[..., Any], Callable[..., Any]]:
+    """Build expensive symbolic validation functions once per benchmark NLP."""
+    n = nlp.dimension
+    equalities = sympy.ImmutableDenseMatrix(nlp.g)
+    arguments = (*nlp.x, *nlp.parameters)
+    model = sympy.lambdify(
+        arguments,
+        (
+            nlp.f,
+            equalities,
+            sympy.ImmutableDenseMatrix([sympy.diff(nlp.f, item) for item in nlp.x]),
+            sympy.hessian(nlp.f, nlp.x),
+            equalities.jacobian(sympy.ImmutableDenseMatrix(nlp.x)) if nlp.g else sympy.zeros(0, n),
+            sympy.ImmutableDenseMatrix(nlp.lb),
+            sympy.ImmutableDenseMatrix(nlp.ub),
+        ),
+        modules="numpy",
+    )
+    equality_hessians = sympy.lambdify(
+        arguments,
+        tuple(sympy.hessian(equality, nlp.x) for equality in nlp.g),
+        modules="numpy",
+    )
+    return model, equality_hessians
 
 
 def certify_local_minimum(  # noqa: PLR0915
@@ -99,18 +128,8 @@ def certify_local_minimum(  # noqa: PLR0915
     params = numpy.asarray(parameters, dtype=float).reshape(-1)
     n = nlp.dimension
     m = nlp.equality_dimension
-    variables = sympy.ImmutableDenseMatrix(nlp.x)
-    equalities = sympy.ImmutableDenseMatrix(nlp.g)
-    expressions = (
-        nlp.f,
-        equalities,
-        sympy.ImmutableDenseMatrix([sympy.diff(nlp.f, item) for item in nlp.x]),
-        sympy.hessian(nlp.f, nlp.x),
-        equalities.jacobian(variables) if m else sympy.zeros(0, n),
-        sympy.ImmutableDenseMatrix(nlp.lb),
-        sympy.ImmutableDenseMatrix(nlp.ub),
-    )
-    raw = sympy.lambdify((*nlp.x, *nlp.parameters), expressions, modules="numpy")(*x, *params)
+    model_evaluator, equality_hessian_evaluator = _evaluators(nlp)
+    raw = model_evaluator(*x, *params)
     values = SimpleNamespace(
         objective=float(raw[0]),
         equalities=numpy.asarray(raw[1], dtype=float).reshape(m),
@@ -157,7 +176,7 @@ def certify_local_minimum(  # noqa: PLR0915
 
     equality_rank = numpy.linalg.matrix_rank(values.equality_jacobian, tol=rank_tolerance)
     lagrangian_hessian = values.hessian.copy()
-    equality_hessians = tuple(numpy.asarray(sympy.lambdify((*nlp.x, *nlp.parameters), sympy.hessian(item, nlp.x), modules="numpy")(*x, *params), dtype=float) for item in nlp.g)
+    equality_hessians = numpy.asarray(equality_hessian_evaluator(*x, *params), dtype=float).reshape(m, n, n)
     for multiplier, hessian in zip(equality_multipliers, equality_hessians, strict=True):
         lagrangian_hessian += multiplier * hessian
 

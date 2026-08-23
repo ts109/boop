@@ -6,7 +6,7 @@ from pathlib import Path
 import numpy
 import sympy
 
-from boop import NonlinearProgram, create_compiled_solver, generate_c_solver
+from boop import NonlinearProgram, SolverOptions, create_compiled_solver, generate_c_solver
 
 
 def test_generated_c_builds_as_a_standalone_solver(tmp_path: Path) -> None:
@@ -72,10 +72,11 @@ def test_compiled_solver_matches_reference_and_wraps_native_diagnostics(tmp_path
     assert isinstance(result.x, list)
     numpy.testing.assert_allclose(result.x, [numpy.sqrt(0.5), 0.5], atol=2e-5, rtol=0)
     assert type(result.diagnostics).__module__.startswith("boop_jit_")
-    assert len(result.diagnostics.procedure) == 20
-    assert len(result.diagnostics.objective) == 20
-    assert len(result.diagnostics.x) == 20
-    assert len(result.diagnostics.active_bounds) == 20
-    assert len(result.diagnostics.cg_final_rayleigh) == 20
+    iterations = SolverOptions().sqp_iterations
+    assert len(result.diagnostics.procedure) == iterations
+    assert len(result.diagnostics.objective) == iterations
+    assert len(result.diagnostics.x) == iterations
+    assert len(result.diagnostics.active_bounds) == iterations
+    assert len(result.diagnostics.cg_final_rayleigh) == iterations
     extension_source = next(tmp_path.glob("*/boop_extension.c")).read_text()
     assert "numpy" not in extension_source.lower()

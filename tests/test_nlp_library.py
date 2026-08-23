@@ -18,7 +18,7 @@ BenchmarkResult = tuple[str, int, int, int, float, float, int, float]
 
 # Every problem uses a prefix of this vector. Each table entry keeps the
 # mathematical problem beside the initializer from which it is normally run.
-x = sympy.symbols("x:20")
+x = sympy.symbols("x:100")
 
 NLP_LIBRARY = {
     "unconstrained_quadratic": (
@@ -163,6 +163,36 @@ NLP_LIBRARY = {
         ),
         numpy.linspace(2.0, -2.0, 20),
     ),
+    "thirty_variables_three_dof_linear": (
+        NonlinearProgram(
+            x=x[:30],
+            f=sum((1 + i / 30) * x[i] ** 2 for i in range(30)),
+            g=tuple(x[i] - sympy.Rational(1, 5) * x[i + 3] for i in range(27)),
+            lb=(-1,) * 30,
+            ub=(1,) * 30,
+        ),
+        numpy.linspace(0.3, -0.3, 30),
+    ),
+    "sixty_variables_four_dof_nonlinear": (
+        NonlinearProgram(
+            x=x[:60],
+            f=sum((1 + i / 60) * x[i] ** 2 for i in range(60)),
+            g=tuple(x[i] - sympy.Rational(1, 10) * sympy.sin(x[i + 4]) for i in range(56)),
+            lb=(-1,) * 60,
+            ub=(1,) * 60,
+        ),
+        numpy.linspace(-0.25, 0.25, 60),
+    ),
+    "hundred_variables_three_dof_mixed": (
+        NonlinearProgram(
+            x=x[:100],
+            f=sum((1 + i / 100) * x[i] ** 2 for i in range(100)),
+            g=tuple(x[i] - sympy.Rational(1, 10) * x[i + 3] for i in range(48)) + tuple(x[i] - sympy.Rational(1, 20) * x[i + 3] ** 2 for i in range(48, 97)),
+            lb=(-1,) * 100,
+            ub=(1,) * 100,
+        ),
+        numpy.linspace(0.2, -0.2, 100),
+    ),
     "hs001": (
         NonlinearProgram(
             x=x[:2],
@@ -250,7 +280,8 @@ def solve_and_validate(
 def test_nlp_library(name: str, problem_and_initializer: ProblemAndInitializer) -> None:
     """Solve and validate one declarative benchmark-library entry."""
     problem, initializer = problem_and_initializer
-    solve_and_validate(name, problem, initializer)
+    repeats = 3 if problem.dimension >= 30 else 10
+    solve_and_validate(name, problem, initializer, repeats)
 
 
 def main() -> None:
