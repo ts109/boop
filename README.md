@@ -30,9 +30,15 @@ problem-specific sparse LDLᵀ schedule. At runtime Boop:
 3. assembles and factors `E_F E_F.T + rho I`, regularizing only equalities;
 4. computes a Byrd--Omojokun normal step;
 5. computes the tangential step with projected Steihaug CG;
-6. tries a second-order correction and the configured fallback steps;
-7. globalizes with the full-history objective/violation filter; and
-8. updates the primal-dual bound active set after accepted candidates.
+6. converts a blocking box constraint into a transition-only SQP iteration;
+7. tries a box-feasible second-order correction and fallback steps; and
+8. globalizes objective value against equality violation with the full-history
+   filter.
+
+The initial guess is projected onto the box. Bound crossings never reach the
+filter: blocking bounds update the working set while the iterate, trust radius,
+and filter remain unchanged. Bounds with invalid multipliers are removed in the
+same transition-only fashion.
 
 The outer SQP and inner CG iteration counts are fixed. Numerical zero checks
 inside linear algebra prevent undefined divisions but are not optimization

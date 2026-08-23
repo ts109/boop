@@ -1,10 +1,13 @@
+"""Tests for generated evaluators and sparse LDL programs."""
+
 import numpy
 import sympy
 
 from boop import GeneratedProgram, NonlinearProgram
 
 
-def test_generated_sparse_ldl_matches_numpy_solve():
+def test_generated_sparse_ldl_matches_numpy_solve() -> None:
+    """Match NumPy when solving with a generated sparse LDL schedule."""
     x = sympy.symbols("x:5")
     model = NonlinearProgram(
         x=x,
@@ -20,7 +23,8 @@ def test_generated_sparse_ldl_matches_numpy_solve():
     numpy.testing.assert_allclose(factor.solve(rhs), numpy.linalg.solve(gram, rhs), rtol=1e-12, atol=1e-12)
 
 
-def test_generated_derivatives_and_parameters():
+def test_generated_derivatives_and_parameters() -> None:
+    """Evaluate generated derivatives and parameterized bounds correctly."""
     x, y, target = sympy.symbols("x y target")
     model = NonlinearProgram(
         x=(x, y),
