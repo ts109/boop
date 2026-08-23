@@ -40,7 +40,7 @@ class SolverOptions:
         may be released based on its multiplier.
     """
 
-    sqp_iterations: int = 20
+    sqp_iterations: int = 10
     cg_iterations: int = 10
     initial_trust_radius: float = 1.0
     trust_expand: float = 2.0
