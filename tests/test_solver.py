@@ -3,7 +3,7 @@
 import numpy
 import sympy
 
-from boop import NonlinearProgram, Procedure, SolverOptions, create_solver
+from boop import NonlinearProgram, SolverOptions, create_compiled_solver
 
 
 def test_equality_constrained_quadratic() -> None:
@@ -16,41 +16,40 @@ def test_equality_constrained_quadratic() -> None:
         lb=(0, 0),
         ub=(2, 2),
     )
-    solver = create_solver(model, SolverOptions(sqp_iterations=6, cg_iterations=4))
+    solver = create_compiled_solver(model, SolverOptions(sqp_iterations=6, cg_iterations=4))
     result = solver([0.8, 0.8], diagnostics=True)
     numpy.testing.assert_allclose(result.x, [0.5, 0.5], atol=1e-8)
-    assert len(result.diagnostics.iterations) == 6
-    assert result.diagnostics.iterations[0].accepted
-    assert all(trial.procedure == Procedure.BYRD_OMOJOKUN for iteration in result.diagnostics.iterations for trial in iteration.trials)
+    assert len(result.diagnostics.procedure) == 6
+    assert result.diagnostics.accepted[0]
+    assert set(result.diagnostics.procedure) <= {"byrd-omojukun", "rejected"}
 
 
 def test_active_upper_bound_is_identified_and_enforced() -> None:
     """Identify an optimal upper bound and enforce it exactly."""
     x = sympy.symbols("x")
     model = NonlinearProgram(x=(x,), f=(x - 2) ** 2, lb=(0,), ub=(1,))
-    solver = create_solver(
+    solver = create_compiled_solver(
         model,
         SolverOptions(sqp_iterations=8, cg_iterations=3),
     )
     result = solver([0.0], diagnostics=True)
     numpy.testing.assert_allclose(result.x, [1.0], atol=1e-8)
-    assert any(item.active_bounds[0] == 1 for item in result.diagnostics.iterations)
+    assert any(item[0] == 1 for item in result.diagnostics.active_bounds)
 
 
 def test_blocking_bound_consumes_an_iteration_without_moving() -> None:
     """Keep numerical state fixed during an active-set transition."""
     x = sympy.symbols("x")
     model = NonlinearProgram(x=(x,), f=(x - 2) ** 2, ub=(1,))
-    solver = create_solver(model, SolverOptions(sqp_iterations=2, initial_trust_radius=1.0))
+    solver = create_compiled_solver(model, SolverOptions(sqp_iterations=2, initial_trust_radius=1.0))
     result = solver([0.0], diagnostics=True)
-    transition, accepted = result.diagnostics.iterations
 
-    assert transition.procedure == Procedure.ACTIVE_SET_UPDATE
-    assert not transition.accepted
-    numpy.testing.assert_array_equal(transition.x, [0.0])
-    assert transition.trust_radius == 1.0
-    assert transition.active_bounds[0] == 1
-    assert accepted.accepted
+    assert result.diagnostics.procedure[0] == "active-set-update"
+    assert not result.diagnostics.accepted[0]
+    numpy.testing.assert_array_equal(result.diagnostics.x[0], [0.0])
+    assert result.diagnostics.trust_radius[0] == 1.0
+    assert result.diagnostics.active_bounds[0][0] == 1
+    assert result.diagnostics.accepted[1]
     numpy.testing.assert_allclose(result.x, [1.0])
 
 
@@ -62,23 +61,21 @@ def test_bound_is_not_released_before_its_face_is_stationary() -> None:
         f=100 * (y - x**2) ** 2 + (1 - x) ** 2,
         lb=(0, 1.5),
     )
-    result = create_solver(model)([1.224958, 1.5], diagnostics=True)
+    result = create_compiled_solver(model)([1.224958, 1.5], diagnostics=True)
 
     numpy.testing.assert_allclose(result.x, [1.224370748736353, 1.5], atol=1e-10)
-    transitions = [item for item in result.diagnostics.iterations if item.procedure == Procedure.ACTIVE_SET_UPDATE]
+    transitions = [i for i, procedure in enumerate(result.diagnostics.procedure) if procedure == "active-set-update"]
     assert len(transitions) == 1
-    assert transitions[0].active_bounds_before[1] == 0
-    assert transitions[0].active_bounds[1] == -1
-    assert result.diagnostics.iterations[-1].bound_multipliers[1] > 0.0
+    assert result.diagnostics.active_bounds[transitions[0]][1] == -1
 
 
 def test_initial_guess_is_projected_onto_box() -> None:
     """Project an infeasible initial guess before the first SQP iteration."""
     x = sympy.symbols("x")
     model = NonlinearProgram(x=(x,), f=(x - 0.5) ** 2, lb=(0,), ub=(1,))
-    result = create_solver(model, SolverOptions(sqp_iterations=1))([5.0], diagnostics=True)
+    result = create_compiled_solver(model, SolverOptions(sqp_iterations=1))([5.0], diagnostics=True)
     assert 0.0 <= result.x[0] <= 1.0
-    assert 0.0 <= result.diagnostics.iterations[0].x[0] <= 1.0
+    assert 0.0 <= result.diagnostics.x[0][0] <= 1.0
 
 
 def test_steihaug_handles_negative_curvature_at_boundary() -> None:
@@ -86,13 +83,10 @@ def test_steihaug_handles_negative_curvature_at_boundary() -> None:
     x, y = sympy.symbols("x y")
     model = NonlinearProgram(x=(x, y), f=-(x**2) + y**2)
     options = SolverOptions(sqp_iterations=1, cg_iterations=5, initial_trust_radius=0.25)
-    result = create_solver(model, options)([0.1, 0.1], diagnostics=True)
-    step = result.x - numpy.array([0.1, 0.1])
+    result = create_compiled_solver(model, options)([0.1, 0.1], diagnostics=True)
+    step = numpy.asarray(result.x) - numpy.array([0.1, 0.1])
     assert numpy.linalg.norm(step) <= 0.25 + 1e-12
-    assert result.diagnostics.iterations[0].procedure in {
-        Procedure.BYRD_OMOJOKUN,
-        Procedure.BYRD_OMOJOKUN_SOC,
-    }
+    assert result.diagnostics.procedure[0] in {"byrd-omojukun", "byrd-omojukun-soc"}
 
 
 def test_nonlinear_equality_with_second_order_correction() -> None:
@@ -105,10 +99,10 @@ def test_nonlinear_equality_with_second_order_correction() -> None:
         lb=(0, 0),
         ub=(2, 2),
     )
-    result = create_solver(
+    result = create_compiled_solver(
         model,
         SolverOptions(sqp_iterations=15, cg_iterations=8, initial_trust_radius=0.5),
     )([0.8, 0.4], diagnostics=True)
     numpy.testing.assert_allclose(result.x, [numpy.sqrt(0.5), 0.5], atol=2e-5)
     assert abs(result.x[0] ** 2 + result.x[1] - 1.0) < 1e-10
-    assert any(trial.procedure == Procedure.BYRD_OMOJOKUN_SOC for iteration in result.diagnostics.iterations for trial in iteration.trials)
+    assert "byrd-omojukun-soc" in result.diagnostics.procedure

@@ -9,8 +9,9 @@ from time import perf_counter
 import numpy
 import pytest
 import sympy
+from optimality_check import certify_local_minimum
 
-from boop import NonlinearProgram, SolverOptions, certify_local_minimum, create_solver, print_solver_diagnostics
+from boop import NonlinearProgram, SolverOptions, create_compiled_solver
 
 ProblemAndInitializer = tuple[NonlinearProgram, numpy.ndarray]
 BenchmarkResult = tuple[str, int, int, int, float, float, int, float]
@@ -193,7 +194,7 @@ def solve_and_validate(
 ) -> BenchmarkResult:
     """Compile, solve, validate, and benchmark one table entry."""
     compile_start = perf_counter()
-    solver = create_solver(problem, OPTIONS)
+    solver = create_compiled_solver(problem, OPTIONS)
     compile_seconds = perf_counter() - compile_start
 
     rng = numpy.random.default_rng(sum(name.encode()))
@@ -211,24 +212,24 @@ def solve_and_validate(
 
     for initial_guess in initial_guesses:
         start = perf_counter()
-        results.append(solver(initial_guess, diagnostics=True))
+        results.append(solver(initial_guess.tolist(), diagnostics=True))
         solve_seconds.append(perf_counter() - start)
 
     result = results[-1]
     if os.getenv("BOOP_TEST_DIAGNOSTICS"):
         print(f"\nDiagnostics for benchmark problem {name!r}")
-        print_solver_diagnostics(result.diagnostics)
+        print(result.diagnostics.procedure)
 
-    certificates = [certify_local_minimum(solver, repeated.x) for repeated in results]
+    certificates = [certify_local_minimum(problem, repeated.x) for repeated in results]
 
-    assert len(result.diagnostics.iterations) == OPTIONS.sqp_iterations
+    assert len(result.diagnostics.procedure) == OPTIONS.sqp_iterations
     assert numpy.all(numpy.isfinite(result.x))
-    assert all(numpy.isfinite(item.objective) for item in result.diagnostics.iterations)
-    assert all(numpy.isfinite(item.violation) for item in result.diagnostics.iterations)
-    assert all(item.trust_radius > 0 for item in result.diagnostics.iterations)
+    assert all(numpy.isfinite(item) for item in result.diagnostics.objective)
+    assert all(numpy.isfinite(item) for item in result.diagnostics.violation)
+    assert all(item > 0 for item in result.diagnostics.trust_radius)
 
-    values = solver.program.evaluate(result.x, numpy.empty(0))
-    number_bounds = numpy.count_nonzero(numpy.isfinite(values.lower_bounds)) + numpy.count_nonzero(numpy.isfinite(values.upper_bounds))
+    bounds = (*(problem.lb or ()), *(problem.ub or ()))
+    number_bounds = sum(sympy.sympify(bound).is_finite is not False for bound in bounds)
     return (
         name,
         problem.dimension,
@@ -236,7 +237,7 @@ def solve_and_validate(
         int(number_bounds),
         compile_seconds,
         median(solve_seconds),
-        sum(item.accepted for item in result.diagnostics.iterations),
+        sum(result.diagnostics.accepted),
         certificates[-1].primal_residual,
     )
 

@@ -6,11 +6,14 @@ requires = ["setuptools", "wheel"]
 name = "boop"
 version = "0.0"
 authors = [{name = "Tillmann Stübler", email = "ts109@pm.me"}]
-dependencies = ["numpy", "sympy"]
+dependencies = ["sympy"]
 requires-python = ">= 3.14"
 
 [project.optional-dependencies]
-test = ["pytest"]
+test = ["numpy", "pytest"]
+
+[tool.setuptools.package-data]
+boop = ["c_runtime/*.c", "c_runtime/*.h"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

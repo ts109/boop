@@ -7,7 +7,7 @@ constraints and parameterized box constraints.
 ```python
 import sympy as sp
 
-from boop import NonlinearProgram, SolverOptions, create_solver
+from boop import NonlinearProgram, SolverOptions, create_compiled_solver
 
 x, y = sp.symbols("x y")
 nlp = NonlinearProgram(
@@ -17,30 +17,20 @@ nlp = NonlinearProgram(
     lb=(0, 0),
     ub=(2, 2),
 )
-solver = create_solver(nlp, SolverOptions(sqp_iterations=20))
+solver = create_compiled_solver(nlp, SolverOptions(sqp_iterations=20))
 solution = solver([0.8, 0.4])
 ```
 
-For a full numerical trace, request diagnostics and print the report:
+For a full numerical trace, request native diagnostics:
 
 ```python
-from boop import print_solver_diagnostics
-
 result = solver([0.8, 0.4], diagnostics=True)
-print_solver_diagnostics(result.diagnostics)
+print(result.diagnostics.procedure)
+print(result.diagnostics.violation)
 ```
 
-The report includes every attempted filter candidate, step component, working-
-set transition, multiplier estimate, Steihaug stopping reason, trust-radius
-change, equality factorization condition estimate, Hessian spectrum, and primal
-and stationarity residual. To print this report for every declarative benchmark,
-run `BOOP_TEST_DIAGNOSTICS=1 pytest -s tests/test_nlp_library.py`.
-
-Benchmark results are checked with `certify_local_minimum`. The certificate
-recomputes final-point multipliers and the Lagrangian Hessian, then requires
-feasibility, KKT consistency, independent equalities, and strictly positive
-curvature on the equality tangent space. Retaining active-box directions makes
-the second-order test conservative but safe for weakly active bounds.
+Diagnostic histories remain in the native C structure until their corresponding
+Python properties are accessed.
 
 The generated program contains SymPy expressions for the evaluator and a
 problem-specific sparse LDLᵀ schedule. At runtime Boop:
@@ -52,7 +42,7 @@ problem-specific sparse LDLᵀ schedule. At runtime Boop:
 4. computes a Byrd--Omojokun normal step;
 5. computes the tangential step with projected Steihaug CG;
 6. converts a blocking box constraint into a transition-only SQP iteration;
-7. tries a box-feasible second-order correction and fallback steps; and
+7. tries a box-feasible second-order correction and the uncorrected step; and
 8. globalizes objective value against equality violation with the full-history
    filter.
 
@@ -65,5 +55,13 @@ The outer SQP and inner CG iteration counts are fixed. Numerical zero checks
 inside linear algebra prevent undefined divisions but are not optimization
 termination criteria.
 
-The initial execution backend uses NumPy. Native source printing and compiled
-extension caching are intentionally separate from the numerical prototype.
+Boop has no interpreted numerical backend. `generate_c_solver(nlp).write(directory)`
+emits a standalone C11 solver. Its
+public API uses caller-owned workspace and diagnostic structures and performs
+no dynamic allocation. `create_compiled_solver(nlp)` builds and caches a CPython
+extension around the same runtime. The extension accepts ordinary sequences
+(including NumPy arrays through Python's sequence protocol) without using the
+NumPy C API, and solutions are returned as plain `list[float]` values. When
+diagnostics are requested, it returns an extension-backed object whose
+individual histories are converted to Python lists only when their properties
+are accessed.

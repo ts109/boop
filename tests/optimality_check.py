@@ -2,10 +2,12 @@
 
 from collections.abc import Sequence
 from dataclasses import dataclass
+from types import SimpleNamespace
 
 import numpy
+import sympy
 
-from .solver import Solver
+from boop import NonlinearProgram
 
 
 @dataclass(frozen=True, slots=True)
@@ -47,7 +49,7 @@ class LocalMinimumError(AssertionError):
 
 
 def certify_local_minimum(  # noqa: PLR0915
-    solver: Solver,
+    nlp: NonlinearProgram,
     point: Sequence[float] | numpy.ndarray,
     parameters: Sequence[float] | numpy.ndarray = (),
     *,
@@ -66,8 +68,8 @@ def certify_local_minimum(  # noqa: PLR0915
 
     Parameters
     ----------
-    solver
-        Solver whose generated derivatives define the NLP.
+    nlp
+        Symbolic nonlinear program to certify.
     point
         Candidate decision vector.
     parameters
@@ -95,9 +97,29 @@ def certify_local_minimum(  # noqa: PLR0915
     """
     x = numpy.asarray(point, dtype=float).reshape(-1)
     params = numpy.asarray(parameters, dtype=float).reshape(-1)
-    values = solver.program.evaluate(x, params)
-    n = solver.nlp.dimension
-    m = solver.nlp.equality_dimension
+    n = nlp.dimension
+    m = nlp.equality_dimension
+    variables = sympy.ImmutableDenseMatrix(nlp.x)
+    equalities = sympy.ImmutableDenseMatrix(nlp.g)
+    expressions = (
+        nlp.f,
+        equalities,
+        sympy.ImmutableDenseMatrix([sympy.diff(nlp.f, item) for item in nlp.x]),
+        sympy.hessian(nlp.f, nlp.x),
+        equalities.jacobian(variables) if m else sympy.zeros(0, n),
+        sympy.ImmutableDenseMatrix(nlp.lb),
+        sympy.ImmutableDenseMatrix(nlp.ub),
+    )
+    raw = sympy.lambdify((*nlp.x, *nlp.parameters), expressions, modules="numpy")(*x, *params)
+    values = SimpleNamespace(
+        objective=float(raw[0]),
+        equalities=numpy.asarray(raw[1], dtype=float).reshape(m),
+        gradient=numpy.asarray(raw[2], dtype=float).reshape(n),
+        hessian=numpy.asarray(raw[3], dtype=float).reshape(n, n),
+        equality_jacobian=numpy.asarray(raw[4], dtype=float).reshape(m, n),
+        lower_bounds=numpy.asarray(raw[5], dtype=float).reshape(n),
+        upper_bounds=numpy.asarray(raw[6], dtype=float).reshape(n),
+    )
 
     equality_violation = float(numpy.max(numpy.abs(values.equalities))) if m else 0.0
     lower_violation = float(numpy.max(numpy.maximum(values.lower_bounds - x, 0.0)))
@@ -135,7 +157,7 @@ def certify_local_minimum(  # noqa: PLR0915
 
     equality_rank = numpy.linalg.matrix_rank(values.equality_jacobian, tol=rank_tolerance)
     lagrangian_hessian = values.hessian.copy()
-    equality_hessians = solver.program.evaluate_equality_hessians(x, params)
+    equality_hessians = tuple(numpy.asarray(sympy.lambdify((*nlp.x, *nlp.parameters), sympy.hessian(item, nlp.x), modules="numpy")(*x, *params), dtype=float) for item in nlp.g)
     for multiplier, hessian in zip(equality_multipliers, equality_hessians, strict=True):
         lagrangian_hessian += multiplier * hessian
 

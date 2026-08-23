@@ -3,8 +3,9 @@
 import numpy
 import pytest
 import sympy
+from optimality_check import LocalMinimumError, certify_local_minimum
 
-from boop import LocalMinimumError, NonlinearProgram, certify_local_minimum, create_solver
+from boop import NonlinearProgram
 
 
 def test_certificate_uses_lagrangian_curvature() -> None:
@@ -17,11 +18,9 @@ def test_certificate_uses_lagrangian_curvature() -> None:
         lb=(0, 0),
         ub=(2, 2),
     )
-    solver = create_solver(nlp)
-
     minimum = numpy.array([numpy.sqrt(0.5), 0.5])
-    certificate = certify_local_minimum(solver, minimum)
+    certificate = certify_local_minimum(nlp, minimum)
     assert certificate.minimum_reduced_curvature > 0.0
 
     with pytest.raises(LocalMinimumError, match="minimum reduced curvature"):
-        certify_local_minimum(solver, numpy.array([0.0, 1.0]))
+        certify_local_minimum(nlp, numpy.array([0.0, 1.0]))
