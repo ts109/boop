@@ -61,17 +61,20 @@ class SolverOptions:
         if self.sqp_iterations <= 0 or self.cg_iterations <= 0:
             message = "iteration counts must be positive"
             raise ValueError(message)
+
         if self.initial_trust_radius <= 0.0:
             message = "initial_trust_radius must be positive"
             raise ValueError(message)
+
         if self.trust_expand <= 1.0:
             message = "trust_expand must be greater than one"
             raise ValueError(message)
+
         if not 0.0 < self.trust_shrink < 1.0:
             message = "trust_shrink must lie between zero and one"
             raise ValueError(message)
-        if (
-            min(
+
+        if min(
                 self.equality_regularization,
                 self.tangential_damping,
                 self.curvature_floor,
@@ -80,8 +83,6 @@ class SolverOptions:
                 self.filter_gamma,
                 self.bound_tolerance,
                 self.active_set_stationarity_tolerance,
-            )
-            < 0.0
-        ):
+            ) < 0.0:
             message = "regularization and tolerance options must be nonnegative"
             raise ValueError(message)

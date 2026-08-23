@@ -158,18 +158,26 @@ def certify_local_minimum(  # noqa: PLR0915
 
     scale = max(1.0, float(numpy.linalg.norm(values.gradient, ord=numpy.inf)))
     failures = []
+
     if certificate.primal_residual > feasibility_tolerance:
         failures.append(f"primal residual {certificate.primal_residual:.3g} exceeds {feasibility_tolerance:.3g}")
+
     if certificate.equality_rank != m:
         failures.append(f"equality Jacobian rank is {certificate.equality_rank}, expected {m}")
+
     if certificate.stationarity_residual > stationarity_tolerance * scale:
         failures.append(f"stationarity residual {certificate.stationarity_residual:.3g} exceeds {stationarity_tolerance * scale:.3g}")
+
     if lower_values.size and float(numpy.min(lower_values)) < -stationarity_tolerance:
         failures.append(f"lower-bound multiplier is negative ({float(numpy.min(lower_values)):.3g})")
+
     if upper_values.size and float(numpy.min(upper_values)) < -stationarity_tolerance:
         failures.append(f"upper-bound multiplier is negative ({float(numpy.min(upper_values)):.3g})")
+
     if certificate.minimum_reduced_curvature <= curvature_tolerance:
         failures.append(f"minimum reduced curvature {certificate.minimum_reduced_curvature:.3g} is not greater than {curvature_tolerance:.3g}")
+
     if failures:
         raise LocalMinimumError("; ".join(failures))
+
     return certificate
