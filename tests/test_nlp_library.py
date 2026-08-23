@@ -79,6 +79,70 @@ NLP_LIBRARY = {
         ),
         numpy.array([2.0, -2.0, 1.0, 2.0, -2.0]),
     ),
+    "anisotropic_objective": (
+        NonlinearProgram(
+            x=x[:6],
+            f=(1e-6 * (x[0] - 1) ** 2 + 1e-3 * (x[1] + 1) ** 2 + (x[2] - 0.5) ** 2 + 1e2 * (x[3] + 0.5) ** 2 + 1e4 * (x[4] - 2) ** 2 + 1e6 * (x[5] + 2) ** 2),
+        ),
+        numpy.array([1.2, -0.8, 0.8, -0.2, 2.2, -1.8]),
+    ),
+    "mixed_transcendental_objective": (
+        NonlinearProgram(
+            x=x[:4],
+            f=(
+                sympy.exp(3 * (x[0] - sympy.Rational(1, 5)))
+                - 3 * (x[0] - sympy.Rational(1, 5))
+                - 1
+                + 10 * (-sympy.log(x[1]) + x[1] - 1)
+                + 1 / (x[2] + 1)
+                + (x[2] + 1) / 4
+                - 1
+                + (sympy.cosh(4 * (x[3] + sympy.Rational(3, 10))) - 1) / 100
+            ),
+            lb=(-1, sympy.Rational(1, 10), sympy.Rational(-1, 2), -1),
+            ub=(1, 3, 3, 1),
+        ),
+        numpy.array([0.35, 1.2, 0.8, -0.1]),
+    ),
+    "mixed_scale_nonlinear_equalities": (
+        NonlinearProgram(
+            x=x[:5],
+            f=(x[0] - 0.5) ** 2 + (x[1] + 0.5) ** 2 + (x[2] - 1) ** 2 + (x[3] - 0.25) ** 2 + (x[4] + 0.25) ** 2,
+            g=(
+                1e4 * (sympy.sin(x[0]) + x[1] - sympy.sin(sympy.Rational(1, 2)) + sympy.Rational(1, 2)),
+                1e-4 * (x[2] ** 2 + x[3] + x[4] - 1),
+            ),
+            lb=(-1, -2, 0, -1, -1),
+            ub=(2, 1, 2, 1, 1),
+        ),
+        numpy.array([0.65, -0.6, 0.85, 0.4, -0.15]),
+    ),
+    "transcendental_manifold": (
+        NonlinearProgram(
+            x=x[:4],
+            f=(x[0] - 0.4) ** 2 + 3 * (x[1] + 0.2) ** 2 + (x[2] - 0.7) ** 4 + (x[2] - 0.7) ** 2 + 2 * (x[3] + 0.1) ** 2,
+            g=(
+                sympy.sin(2 * x[0]) + x[1] ** 3 - sympy.sin(sympy.Rational(4, 5)) + sympy.Rational(1, 125),
+                sympy.exp(x[1] / 2) + x[2] * x[3] - sympy.exp(sympy.Rational(-1, 10)) + sympy.Rational(7, 100),
+            ),
+            lb=(-1, -1, 0, -1),
+            ub=(1, 1, 2, 1),
+        ),
+        numpy.array([0.5, -0.3, 0.8, -0.2]),
+    ),
+    "coupled_rosenbrock_manifold": (
+        NonlinearProgram(
+            x=x[:5],
+            f=sum(50 * (x[i + 1] - x[i] ** 2) ** 2 + (1 - x[i]) ** 2 for i in range(4)),
+            g=(
+                x[0] * x[2] + x[4] - 2,
+                x[1] + sympy.sin(x[3]) - 1 - sympy.sin(1),
+            ),
+            lb=(0, 0, 0, 0, 0),
+            ub=(2, 2, 2, 2, 2),
+        ),
+        numpy.array([1.08, 1.12, 1.1, 1.05, 0.9]),
+    ),
     "nonlinear_equality_infeasible_start": (
         NonlinearProgram(
             x=x[:2],
