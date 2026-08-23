@@ -154,6 +154,20 @@ def create_compiled_solver(nlp: NonlinearProgram, options: SolverOptions | None 
 
 def _compile_extension(code: GeneratedCCode, cache_directory: str | Path | None) -> ModuleType:
     extension_template = resources.files("boop").joinpath("c_runtime", "boop_extension.c").read_text()
+    key = _extension_key(code, extension_template)
+    module_name = f"boop_jit_{key}"
+    root = Path(cache_directory) if cache_directory is not None else Path(tempfile.gettempdir()) / "boop-jit"
+    build_directory = root / key
+    suffix = cast(str, sysconfig.get_config_var("EXT_SUFFIX"))
+    library = build_directory / f"{module_name}{suffix}"
+
+    if not library.exists():
+        _build_extension(code, extension_template, module_name, build_directory, library)
+    return _load_extension(module_name, library)
+
+
+def _extension_key(code: GeneratedCCode, extension_template: str) -> str:
+    """Identify generated sources and the active Python extension ABI."""
     digest = hashlib.sha256()
     for name, content in sorted((*code.headers.items(), *code.sources.items())):
         digest.update(name.encode())
@@ -161,45 +175,57 @@ def _compile_extension(code: GeneratedCCode, cache_directory: str | Path | None)
     digest.update(extension_template.encode())
     digest.update(str(sysconfig.get_config_var("SOABI")).encode())
     digest.update(str(sysconfig.get_config_var("LDSHARED")).encode())
-    key = digest.hexdigest()[:20]
-    module_name = f"boop_jit_{key}"
-    root = Path(cache_directory) if cache_directory is not None else Path(tempfile.gettempdir()) / "boop-jit"
-    build = root / key
-    extension_suffix = cast(str, sysconfig.get_config_var("EXT_SUFFIX"))
-    library = build / f"{module_name}{extension_suffix}"
-    if not library.exists():
-        build.mkdir(parents=True, exist_ok=True)
-        code.write(build)
-        extension = f'#define BOOP_MODULE_TOKEN {module_name}\n#define BOOP_MODULE_STRING "{module_name}"\n{extension_template}'
-        (build / "boop_extension.c").write_text(extension)
-        compiler = shlex.split(cast(str, sysconfig.get_config_var("LDSHARED")))
-        include_python = cast(str, sysconfig.get_config_var("INCLUDEPY"))
-        temporary_library = library.with_name(f"{library.name}.{os.getpid()}.tmp")
-        command = [
-            *compiler,
-            "-std=c11",
-            "-O2",
-            "-Wall",
-            "-Wextra",
-            "-Werror",
-            "-fPIC",
-            "-I",
-            str(build),
-            "-I",
-            include_python,
-            str(build / "boop_runtime.c"),
-            str(build / "boop_problem.c"),
-            str(build / "boop_extension.c"),
-            "-lm",
-            "-o",
-            str(temporary_library),
-        ]
-        try:
-            subprocess.run(command, check=True, capture_output=True, text=True)
-        except subprocess.CalledProcessError as error:
-            message = f"C extension compilation failed:\n{error.stderr}"
-            raise RuntimeError(message) from error
-        temporary_library.replace(library)
+    return digest.hexdigest()[:20]
+
+
+def _build_extension(code: GeneratedCCode, template: str, module_name: str, build: Path, library: Path) -> None:
+    """Materialize and compile one content-addressed extension module."""
+    build.mkdir(parents=True, exist_ok=True)
+    code.write(build)
+    extension = f'#define BOOP_MODULE_TOKEN {module_name}\n#define BOOP_MODULE_STRING "{module_name}"\n{template}'
+    (build / "boop_extension.c").write_text(extension)
+    temporary_library = library.with_name(f"{library.name}.{os.getpid()}.tmp")
+
+    try:
+        subprocess.run(
+            _compiler_command(build, temporary_library),
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    except subprocess.CalledProcessError as error:
+        message = f"C extension compilation failed:\n{error.stderr}"
+        raise RuntimeError(message) from error
+    temporary_library.replace(library)
+
+
+def _compiler_command(build: Path, output: Path) -> list[str]:
+    """Construct the platform-specific CPython extension compiler command."""
+    linker = shlex.split(cast(str, sysconfig.get_config_var("LDSHARED")))
+    python_include = cast(str, sysconfig.get_config_var("INCLUDEPY"))
+    return [
+        *linker,
+        "-std=c11",
+        "-O2",
+        "-Wall",
+        "-Wextra",
+        "-Werror",
+        "-fPIC",
+        "-I",
+        str(build),
+        "-I",
+        python_include,
+        str(build / "boop_runtime.c"),
+        str(build / "boop_problem.c"),
+        str(build / "boop_extension.c"),
+        "-lm",
+        "-o",
+        str(output),
+    ]
+
+
+def _load_extension(module_name: str, library: Path) -> ModuleType:
+    """Load a compiled extension from its content-addressed cache path."""
     specification = importlib.util.spec_from_file_location(module_name, library)
     if specification is None or specification.loader is None:
         message = f"could not load compiled extension {library}"

@@ -356,6 +356,7 @@ BoopStatus boop_solve(BoopWorkspace *work, const double *initial,
   status = boop_evaluate(work->x, parameters, &current);
   if (status)
     return status;
+  /* The projected initial point is the first filter entry. */
   filter_accepts(work, &filter_entries, &current);
   for (int iteration = 0; iteration < BOOP_SQP_ITERATIONS; ++iteration) {
     BoopStep step;
@@ -367,6 +368,7 @@ BoopStatus boop_solve(BoopWorkspace *work, const double *initial,
     status = linearize(work, &current);
     if (status)
       return status;
+    /* Working-set transitions consume an iteration without changing x. */
     int removable = removable_bound(work, &current);
     if (removable >= 0) {
       work->active[removable] = 0;
@@ -374,6 +376,7 @@ BoopStatus boop_solve(BoopWorkspace *work, const double *initial,
              trust);
       continue;
     }
+    /* Walk normally first, then use the remaining radius tangentially. */
     normal_step(work, &current, work->x, step.normal);
     double normal_length = norm(BOOP_N, step.normal);
     if (normal_length > trust) {
@@ -398,6 +401,7 @@ BoopStatus boop_solve(BoopWorkspace *work, const double *initial,
              trust);
       continue;
     }
+    /* Evaluate the fixed-cost SOC trial before the uncorrected BO trial. */
     double bo_x[BOOP_N];
 #if BOOP_NONLINEAR_EQUALITIES
     double soc_x[BOOP_N];
@@ -442,6 +446,7 @@ BoopStatus boop_solve(BoopWorkspace *work, const double *initial,
       memcpy(work->x, chosen_x, sizeof(work->x));
       trust = BOOP_TRUST_EXPAND * norm(BOOP_N, chosen_step);
     } else {
+      /* Drop speculative bounds that the rejected trial never reached. */
       trust *= BOOP_TRUST_SHRINK;
       for (int i = 0; i < BOOP_N; ++i)
         if (work->active[i] && !work->fixed[i]) {

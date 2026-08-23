@@ -32,6 +32,15 @@ print(result.diagnostics.violation)
 Diagnostic histories remain in the native C structure until their corresponding
 Python properties are accessed.
 
+The generation pipeline is deliberately explicit:
+
+1. `build_evaluator_ir` differentiates the normalized `NonlinearProgram`.
+2. `analyze_equality_sparsity` plans Gram assembly, fill reduction, and LDL.
+3. `generate_program` bundles those target-independent representations.
+4. The evaluator and linear-algebra emitters translate their respective IRs.
+5. `generate_c_solver` combines generated code with the handwritten C runtime.
+6. `create_compiled_solver` optionally compiles and caches a CPython extension.
+
 The generated program contains SymPy expressions for the evaluator and a
 problem-specific sparse LDLᵀ schedule. At runtime Boop:
 

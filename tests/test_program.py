@@ -2,13 +2,13 @@
 
 import sympy
 
-from boop import GeneratedProgram, NonlinearProgram
+from boop import NonlinearProgram, generate_program
 
 
 def test_sparse_ldl_schedule_reflects_equality_structure() -> None:
     """Build a valid fill schedule without performing numerical work in Python."""
     x = sympy.symbols("x:5")
-    program = GeneratedProgram(
+    program = generate_program(
         NonlinearProgram(
             x=x,
             f=sum(item**2 for item in x),
@@ -16,19 +16,19 @@ def test_sparse_ldl_schedule_reflects_equality_structure() -> None:
         )
     )
 
-    assert program.jacobian_pattern == (
+    assert program.equality_sparsity.jacobian_pattern == (
         (True, True, False, False, False),
         (False, True, True, False, False),
         (False, False, False, True, True),
     )
-    assert sorted(program.ldl.permutation) == [0, 1, 2]
-    assert program.ldl.dimension == 3
+    assert sorted(program.equality_sparsity.ldl.permutation) == [0, 1, 2]
+    assert program.equality_sparsity.ldl.dimension == 3
 
 
 def test_generated_ir_contains_derivatives_and_parameterized_bounds() -> None:
     """Keep evaluator inputs and symbolic derivatives in the generated IR."""
     x, y, target = sympy.symbols("x y target")
-    program = GeneratedProgram(
+    program = generate_program(
         NonlinearProgram(
             x=(x, y),
             f=(x - target) ** 2 + y**2,
@@ -39,7 +39,7 @@ def test_generated_ir_contains_derivatives_and_parameterized_bounds() -> None:
         )
     )
 
-    assert program.ir.gradient == sympy.ImmutableDenseMatrix((2 * x - 2 * target, 2 * y))
-    assert program.ir.hessian == 2 * sympy.eye(2)
-    assert program.ir.equality_jacobian == sympy.ImmutableDenseMatrix(((1, 1),))
-    assert program.ir.upper_bounds == sympy.ImmutableDenseMatrix((target, sympy.oo))
+    assert program.evaluator.gradient == sympy.ImmutableDenseMatrix((2 * x - 2 * target, 2 * y))
+    assert program.evaluator.hessian == 2 * sympy.eye(2)
+    assert program.evaluator.equality_jacobian == sympy.ImmutableDenseMatrix(((1, 1),))
+    assert program.evaluator.upper_bounds == sympy.ImmutableDenseMatrix((target, sympy.oo))
