@@ -32,6 +32,9 @@ class SolverOptions:
         Fractional constraint-violation improvement required by the filter.
     filter_gamma
         Constraint-violation margin used by the filter objective test.
+    filter_feasibility_floor
+        Violation below which numerical changes cannot constitute filter
+        feasibility progress.
     bound_tolerance
         Numerical tolerance for bound activity, blocking, and fixed-bound
         detection.

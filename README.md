@@ -36,6 +36,12 @@ change, equality factorization condition estimate, Hessian spectrum, and primal
 and stationarity residual. To print this report for every declarative benchmark,
 run `BOOP_TEST_DIAGNOSTICS=1 pytest -s tests/test_nlp_library.py`.
 
+Benchmark results are checked with `certify_local_minimum`. The certificate
+recomputes final-point multipliers and the Lagrangian Hessian, then requires
+feasibility, KKT consistency, independent equalities, and strictly positive
+curvature on the equality tangent space. Retaining active-box directions makes
+the second-order test conservative but safe for weakly active bounds.
+
 The generated program contains SymPy expressions for the evaluator and a
 problem-specific sparse LDLᵀ schedule. At runtime Boop:
 

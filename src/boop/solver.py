@@ -296,9 +296,10 @@ class _Step:
 
 
 class _Filter:
-    def __init__(self, beta: float, gamma: float) -> None:
+    def __init__(self, beta: float, gamma: float, feasibility_floor: float) -> None:
         self.beta = beta
         self.gamma = gamma
+        self.feasibility_floor = feasibility_floor
         self.entries: list[tuple[float, float]] = []
 
     def add_initial(self, objective: float, violation: float) -> None:
@@ -308,7 +309,7 @@ class _Filter:
         # A candidate must improve objective or feasibility over every entry.
         for old_objective, old_violation in self.entries:
             improves_objective = objective + self.gamma * violation <= old_objective
-            improves_feasibility = violation <= (1.0 - self.beta) * old_violation
+            improves_feasibility = old_violation > self.feasibility_floor and violation <= (1.0 - self.beta) * old_violation
 
             if not (improves_objective or improves_feasibility):
                 return False
@@ -397,7 +398,11 @@ class Solver:
         active[fixed] = -1
 
         trust_radius = self.options.initial_trust_radius
-        candidate_filter = _Filter(self.options.filter_beta, self.options.filter_gamma)
+        candidate_filter = _Filter(
+            self.options.filter_beta,
+            self.options.filter_gamma,
+            self.options.bound_tolerance,
+        )
         candidate_filter.add_initial(initial.objective, _equality_violation(initial))
         diagnostics = SolverDiagnostics(
             initial_guess=supplied_initial_guess,
@@ -477,12 +482,13 @@ class Solver:
             # SOC is optional; fallbacks are offered only when box feasible.
             attempts = []
             corrected = step.compound + step.correction
-            if self._box_feasible(x + corrected, current):
+            if self._meaningful_step(x, corrected) and self._box_feasible(x + corrected, current):
                 attempts.append((Procedure.BYRD_OMOJOKUN_SOC, corrected))
-            attempts.append((Procedure.BYRD_OMOJOKUN, step.compound))
-            if self._box_feasible(x + step.projected_gradient, current):
+            if self._meaningful_step(x, step.compound):
+                attempts.append((Procedure.BYRD_OMOJOKUN, step.compound))
+            if self._meaningful_step(x, step.projected_gradient) and self._box_feasible(x + step.projected_gradient, current):
                 attempts.append((Procedure.PROJECTED_GRADIENT, step.projected_gradient))
-            if self._box_feasible(x + step.cauchy, current):
+            if self._meaningful_step(x, step.cauchy) and self._box_feasible(x + step.cauchy, current):
                 attempts.append((Procedure.CAUCHY, step.cauchy))
             accepted = False
             chosen_procedure = Procedure.REJECTED
@@ -748,10 +754,12 @@ class Solver:
         """Return a trust-boundary descent fallback in the tangent space."""
         step = -self._project(linearization.values.gradient, linearization)
         norm = float(numpy.linalg.norm(step))
+        gradient_scale = max(1.0, float(numpy.linalg.norm(linearization.values.gradient)))
 
-        if norm:
-            step *= trust_radius / norm
+        if norm <= self.options.active_set_stationarity_tolerance * gradient_scale:
+            return numpy.zeros_like(step)
 
+        step *= trust_radius / norm
         return step
 
     def _cauchy_step(self, x: numpy.ndarray, linearization: _Linearization, trust_radius: float) -> numpy.ndarray:
@@ -948,6 +956,12 @@ class Solver:
         """Check the invariant required before evaluating a filter candidate."""
         tolerance = self.options.bound_tolerance
         return bool(numpy.all(x >= values.lower_bounds - tolerance) and numpy.all(x <= values.upper_bounds + tolerance))
+
+    @staticmethod
+    def _meaningful_step(x: numpy.ndarray, step: numpy.ndarray) -> bool:
+        """Keep an unchanged iterate out of the filter and radius update."""
+        scale = max(1.0, float(numpy.linalg.norm(x)))
+        return bool(float(numpy.linalg.norm(step)) > numpy.finfo(float).eps * scale)
 
 
 def _boundary_distance(point: numpy.ndarray, direction: numpy.ndarray, radius: float) -> float:
