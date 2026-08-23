@@ -34,6 +34,7 @@ class NonlinearProgram:
     parameters: tuple[sympy.Symbol, ...] = field(default_factory=tuple)
 
     def __post_init__(self) -> None:
+        # Normalize absent and numeric bounds before validating the signature.
         lower_bounds = (sympy.S.NegativeInfinity,) * len(self.x) if self.lb is None else tuple(sympy.sympify(item) for item in self.lb)
         upper_bounds = (sympy.S.Infinity,) * len(self.x) if self.ub is None else tuple(sympy.sympify(item) for item in self.ub)
         object.__setattr__(self, "lb", lower_bounds)
@@ -58,6 +59,7 @@ class NonlinearProgram:
             message = "the number of equalities cannot exceed the variables"
             raise ValueError(message)
 
+        # Generated evaluators have no implicit inputs.
         allowed = {*self.x, *self.parameters}
         expressions = (self.f, *self.g, *lower_bounds, *upper_bounds)
         unknown = set().union(*(expr.free_symbols for expr in expressions)) - allowed

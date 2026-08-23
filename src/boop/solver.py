@@ -167,10 +167,16 @@ class _Filter:
         self.entries.append((objective, violation))
 
     def accepts(self, objective: float, violation: float) -> bool:
-        accepted = all(objective + self.gamma * violation <= old_objective or violation <= (1.0 - self.beta) * old_violation for old_objective, old_violation in self.entries)
-        if accepted:
-            self.entries.append((objective, violation))
-        return accepted
+        # A candidate must improve objective or feasibility over every entry.
+        for old_objective, old_violation in self.entries:
+            improves_objective = objective + self.gamma * violation <= old_objective
+            improves_feasibility = violation <= (1.0 - self.beta) * old_violation
+
+            if not (improves_objective or improves_feasibility):
+                return False
+
+        self.entries.append((objective, violation))
+        return True
 
 
 class Solver:
@@ -240,41 +246,46 @@ class Solver:
             message = "initial values and parameters must be finite"
             raise ValueError(message)
 
+        # Bounds are enforced geometrically and never delegated to the filter.
         initial = self.program.evaluate(x, params)
         x = numpy.minimum(numpy.maximum(x, initial.lower_bounds), initial.upper_bounds)
         initial = self.program.evaluate(x, params)
+
         active = numpy.zeros(self.nlp.dimension, dtype=numpy.int8)
         fixed = (
             numpy.isfinite(initial.lower_bounds) & numpy.isfinite(initial.upper_bounds) & (numpy.abs(initial.upper_bounds - initial.lower_bounds) <= self.options.bound_tolerance)
         )
         active[fixed] = -1
+
         trust_radius = self.options.initial_trust_radius
         candidate_filter = _Filter(self.options.filter_beta, self.options.filter_gamma)
         candidate_filter.add_initial(initial.objective, _equality_violation(initial))
         diagnostics = SolverDiagnostics()
 
         for _ in range(self.options.sqp_iterations):
+            # This factorization is shared by normal, tangential, and dual solves.
             current = self.program.evaluate(x, params)
             linearization = self._linearize(current, active)
             equality_multipliers, bound_multipliers = self._multipliers(linearization)
             removable = self._removable_bound(current, x, active, fixed, bound_multipliers)
 
             if removable is not None:
+                # Working-set changes consume a predictable outer iteration.
                 active[removable] = 0
                 diagnostics.iterations.append(
                     IterationDiagnostics(
-                        Procedure.ACTIVE_SET_UPDATE,
-                        False,
-                        x.copy(),
-                        current.objective,
-                        _equality_violation(current),
-                        trust_radius,
-                        0.0,
-                        0.0,
-                        0.0,
-                        active.copy(),
-                        equality_multipliers.copy(),
-                        bound_multipliers.copy(),
+                        procedure=Procedure.ACTIVE_SET_UPDATE,
+                        accepted=False,
+                        x=x.copy(),
+                        objective=current.objective,
+                        violation=_equality_violation(current),
+                        trust_radius=trust_radius,
+                        normal_step_norm=0.0,
+                        tangential_step_norm=0.0,
+                        correction_step_norm=0.0,
+                        active_bounds=active.copy(),
+                        equality_multipliers=equality_multipliers.copy(),
+                        bound_multipliers=bound_multipliers.copy(),
                     )
                 )
                 continue
@@ -283,6 +294,7 @@ class Solver:
             blocking = self._blocking_bounds(x, step.compound, current, active)
 
             if blocking.size:
+                # Recompute next iteration with all tied blockers fixed.
                 for index in blocking:
                     active[index] = -1 if step.compound[index] < 0.0 else 1
                 if self.nlp.equality_dimension + numpy.count_nonzero(active) > self.nlp.dimension:
@@ -290,22 +302,23 @@ class Solver:
                     raise ActiveSetError(message)
                 diagnostics.iterations.append(
                     IterationDiagnostics(
-                        Procedure.ACTIVE_SET_UPDATE,
-                        False,
-                        x.copy(),
-                        current.objective,
-                        _equality_violation(current),
-                        trust_radius,
-                        step.normal_norm,
-                        step.tangential_norm,
-                        float(numpy.linalg.norm(step.correction)),
-                        active.copy(),
-                        equality_multipliers.copy(),
-                        bound_multipliers.copy(),
+                        procedure=Procedure.ACTIVE_SET_UPDATE,
+                        accepted=False,
+                        x=x.copy(),
+                        objective=current.objective,
+                        violation=_equality_violation(current),
+                        trust_radius=trust_radius,
+                        normal_step_norm=step.normal_norm,
+                        tangential_step_norm=step.tangential_norm,
+                        correction_step_norm=float(numpy.linalg.norm(step.correction)),
+                        active_bounds=active.copy(),
+                        equality_multipliers=equality_multipliers.copy(),
+                        bound_multipliers=bound_multipliers.copy(),
                     )
                 )
                 continue
 
+            # SOC is optional; fallbacks are offered only when box feasible.
             attempts = []
             corrected = step.compound + step.correction
             if self._box_feasible(x + corrected, current):
@@ -320,10 +333,12 @@ class Solver:
             chosen_step = numpy.zeros_like(x)
             chosen_values = current
             chosen_x = x
+
             for procedure, trial_step in attempts:
                 trial_x = x + trial_step
                 trial = self.program.evaluate(trial_x, params)
                 trial_violation = _equality_violation(trial)
+
                 if candidate_filter.accepts(trial.objective, trial_violation):
                     accepted = True
                     chosen_procedure = procedure
@@ -337,6 +352,7 @@ class Solver:
                 actual_norm = float(numpy.linalg.norm(chosen_step))
                 trust_radius = self.options.trust_expand * actual_norm
             else:
+                # Scheduled but unreached bounds may not block the smaller step.
                 trust_radius *= self.options.trust_shrink
                 scheduled = (active != 0) & ~fixed & ~self._geometrically_active(current, x, active)
                 active[scheduled] = 0
@@ -344,18 +360,18 @@ class Solver:
             trust_radius = max(trust_radius, numpy.finfo(float).eps)
             diagnostics.iterations.append(
                 IterationDiagnostics(
-                    chosen_procedure,
-                    accepted,
-                    x.copy(),
-                    chosen_values.objective if accepted else current.objective,
-                    _equality_violation(chosen_values) if accepted else _equality_violation(current),
-                    trust_radius,
-                    step.normal_norm,
-                    step.tangential_norm,
-                    float(numpy.linalg.norm(step.correction)),
-                    active.copy(),
-                    equality_multipliers.copy(),
-                    bound_multipliers.copy(),
+                    procedure=chosen_procedure,
+                    accepted=accepted,
+                    x=x.copy(),
+                    objective=chosen_values.objective if accepted else current.objective,
+                    violation=_equality_violation(chosen_values) if accepted else _equality_violation(current),
+                    trust_radius=trust_radius,
+                    normal_step_norm=step.normal_norm,
+                    tangential_step_norm=step.tangential_norm,
+                    correction_step_norm=float(numpy.linalg.norm(step.correction)),
+                    active_bounds=active.copy(),
+                    equality_multipliers=equality_multipliers.copy(),
+                    bound_multipliers=bound_multipliers.copy(),
                 )
             )
 
@@ -368,74 +384,123 @@ class Solver:
             raise ActiveSetError(message)
         free = active == 0
         free_jacobian = values.equality_jacobian[:, free]
+
+        # Active box rows reduce to deleting columns from the equality Jacobian.
         gram = self.program.assemble_equality_gram(
             values.equality_jacobian,
             free,
             self.options.equality_regularization,
         )
         factor = self.program.ldl.factor(gram, self.options.factorization_tolerance)
-        return _Linearization(values, active.copy(), free, free_jacobian, factor)
+        return _Linearization(
+            values=values,
+            active=active.copy(),
+            free=free,
+            free_jacobian=free_jacobian,
+            factor=factor,
+        )
 
     def _project(self, vector: numpy.ndarray, linearization: _Linearization) -> numpy.ndarray:
+        """Project a vector into the free-variable equality nullspace."""
         projected = numpy.zeros_like(vector)
         free_values = vector[linearization.free]
+
         if self.nlp.equality_dimension:
             correction = linearization.factor.solve(linearization.free_jacobian @ free_values)
             free_values = free_values - linearization.free_jacobian.T @ correction
+
         projected[linearization.free] = free_values
         return projected
 
     def _step(self, x: numpy.ndarray, parameters: numpy.ndarray, linearization: _Linearization, trust_radius: float) -> _Step:
+        """Construct the Byrd--Omojokun step and inexpensive fallbacks."""
         values = linearization.values
-        normal = numpy.zeros_like(x)
-        lower_active = linearization.active < 0
-        upper_active = linearization.active > 0
-        normal[lower_active] = values.lower_bounds[lower_active] - x[lower_active]
-        normal[upper_active] = values.upper_bounds[upper_active] - x[upper_active]
-
-        if self.nlp.equality_dimension:
-            rhs = -values.equalities - values.equality_jacobian[:, ~linearization.free] @ normal[~linearization.free]
-            y = linearization.factor.solve(rhs)
-            normal[linearization.free] = linearization.free_jacobian.T @ y
-
+        normal = self._normal_step(x, linearization)
         normal_norm = float(numpy.linalg.norm(normal))
 
         if normal_norm > trust_radius:
             normal *= trust_radius / normal_norm
             normal_norm = trust_radius
 
+        # Orthogonality leaves this radius for motion in the nullspace.
         tangential_radius = float(numpy.sqrt(max(0.0, trust_radius * trust_radius - normal_norm * normal_norm)))
         gradient_at_normal = values.gradient + values.hessian @ normal
         tangent = self._steihaug(gradient_at_normal, values.hessian, linearization, tangential_radius)
         compound = normal + tangent
 
-        trial = self.program.evaluate(x + compound, parameters)
-        correction = numpy.zeros_like(x)
-        correction[lower_active] = values.lower_bounds[lower_active] - (x + compound)[lower_active]
-        correction[upper_active] = values.upper_bounds[upper_active] - (x + compound)[upper_active]
+        correction = self._second_order_correction(x, compound, parameters, linearization, trust_radius)
+        projected_gradient = self._projected_gradient_step(linearization, trust_radius)
+        cauchy = self._cauchy_step(x, linearization, trust_radius)
+
+        return _Step(
+            compound=compound,
+            correction=correction,
+            projected_gradient=projected_gradient,
+            cauchy=cauchy,
+            normal_norm=normal_norm,
+            tangential_norm=float(numpy.linalg.norm(tangent)),
+        )
+
+    def _normal_step(self, x: numpy.ndarray, linearization: _Linearization) -> numpy.ndarray:
+        """Find the minimum-norm correction of active bounds and equalities."""
+        values = linearization.values
+        normal = numpy.zeros_like(x)
+        lower_active = linearization.active < 0
+        upper_active = linearization.active > 0
+
+        # Bound components are known exactly; solve equality correction on F.
+        normal[lower_active] = values.lower_bounds[lower_active] - x[lower_active]
+        normal[upper_active] = values.upper_bounds[upper_active] - x[upper_active]
+
         if self.nlp.equality_dimension:
-            correction_rhs = -trial.equalities - values.equality_jacobian[:, ~linearization.free] @ correction[~linearization.free]
-            correction[linearization.free] = linearization.free_jacobian.T @ linearization.factor.solve(correction_rhs)
+            fixed_effect = values.equality_jacobian[:, ~linearization.free] @ normal[~linearization.free]
+            dual_normal = linearization.factor.solve(-values.equalities - fixed_effect)
+            normal[linearization.free] = linearization.free_jacobian.T @ dual_normal
+
+        return normal
+
+    def _second_order_correction(
+        self,
+        x: numpy.ndarray,
+        compound: numpy.ndarray,
+        parameters: numpy.ndarray,
+        linearization: _Linearization,
+        trust_radius: float,
+    ) -> numpy.ndarray:
+        """Correct nonlinear equality error left by the linearized step."""
+        values = linearization.values
+        trial_x = x + compound
+        trial = self.program.evaluate(trial_x, parameters)
+        correction = numpy.zeros_like(x)
+        lower_active = linearization.active < 0
+        upper_active = linearization.active > 0
+
+        correction[lower_active] = values.lower_bounds[lower_active] - trial_x[lower_active]
+        correction[upper_active] = values.upper_bounds[upper_active] - trial_x[upper_active]
+
+        if self.nlp.equality_dimension:
+            fixed_effect = values.equality_jacobian[:, ~linearization.free] @ correction[~linearization.free]
+            dual_correction = linearization.factor.solve(-trial.equalities - fixed_effect)
+            correction[linearization.free] = linearization.free_jacobian.T @ dual_correction
+
         correction_norm = float(numpy.linalg.norm(correction))
         if correction_norm > trust_radius:
             correction *= trust_radius / correction_norm
 
-        projected_gradient = -self._project(values.gradient, linearization)
-        pg_norm = float(numpy.linalg.norm(projected_gradient))
-        if pg_norm:
-            projected_gradient *= trust_radius / pg_norm
+        return correction
 
-        cauchy = self._cauchy_step(x, linearization, trust_radius)
-        return _Step(
-            compound,
-            correction,
-            projected_gradient,
-            cauchy,
-            normal_norm,
-            float(numpy.linalg.norm(tangent)),
-        )
+    def _projected_gradient_step(self, linearization: _Linearization, trust_radius: float) -> numpy.ndarray:
+        """Return a trust-boundary descent fallback in the tangent space."""
+        step = -self._project(linearization.values.gradient, linearization)
+        norm = float(numpy.linalg.norm(step))
+
+        if norm:
+            step *= trust_radius / norm
+
+        return step
 
     def _cauchy_step(self, x: numpy.ndarray, linearization: _Linearization, trust_radius: float) -> numpy.ndarray:
+        """Minimize the linearized constraint norm along steepest descent."""
         values = linearization.values
         active_indices = numpy.flatnonzero(linearization.active)
         residual = numpy.concatenate(
@@ -450,6 +515,8 @@ class Solver:
         )
         if residual.size == 0:
             return numpy.zeros_like(x)
+
+        # Add coordinate rows for the active box constraints.
         jacobian = numpy.vstack(
             (
                 values.equality_jacobian,
@@ -459,8 +526,10 @@ class Solver:
         gradient = jacobian.T @ residual
         image = jacobian @ gradient
         denominator = float(image @ image)
+
         if denominator <= numpy.finfo(float).eps:
             return numpy.zeros_like(x)
+
         step = -(float(gradient @ gradient) / denominator) * gradient
         norm = float(numpy.linalg.norm(step))
         if norm > trust_radius:
@@ -468,6 +537,7 @@ class Solver:
         return cast(numpy.ndarray, step)
 
     def _steihaug(self, gradient: numpy.ndarray, hessian: numpy.ndarray, linearization: _Linearization, radius: float) -> numpy.ndarray:
+        """Approximately minimize the projected quadratic in a trust ball."""
         tangent = numpy.zeros(self.nlp.dimension)
 
         if radius <= numpy.finfo(float).eps:
@@ -483,18 +553,21 @@ class Solver:
         hessian_norm = float(numpy.linalg.norm(hessian))
 
         for _ in range(self.options.cg_iterations):
+            # Projection implements P H P without materializing a nullspace basis.
             action = hessian @ direction + self.options.tangential_damping * hessian_norm * direction
             action = self._project(action, linearization)
             curvature = float(direction @ action)
             direction_norm_sq = float(direction @ direction)
 
             if curvature <= self.options.curvature_floor * direction_norm_sq:
+                # Negative curvature is useful only up to the trust boundary.
                 return tangent + _boundary_distance(tangent, direction, radius) * direction
 
             alpha = residual_norm_sq / curvature
             trial = tangent + alpha * direction
 
             if float(trial @ trial) >= radius * radius:
+                # Interpolate the current CG ray to the trust boundary.
                 return tangent + _boundary_distance(tangent, direction, radius) * direction
 
             tangent = trial
@@ -511,6 +584,7 @@ class Solver:
         return tangent
 
     def _multipliers(self, linearization: _Linearization) -> tuple[numpy.ndarray, numpy.ndarray]:
+        """Estimate equality and signed active-bound multipliers."""
         values = linearization.values
 
         if self.nlp.equality_dimension:
@@ -520,18 +594,22 @@ class Solver:
 
         stationarity = values.gradient + values.equality_jacobian.T @ equality
         bounds = numpy.zeros(self.nlp.dimension)
+
+        # Positive values satisfy the KKT sign on either side of the box.
         bounds[linearization.active < 0] = stationarity[linearization.active < 0]
         bounds[linearization.active > 0] = -stationarity[linearization.active > 0]
 
         return equality, bounds
 
     def _geometrically_active(self, values: ModelValues, x: numpy.ndarray, active: numpy.ndarray) -> numpy.ndarray:
+        """Distinguish reached bounds from bounds scheduled by a blocker."""
         tolerance = self.options.bound_tolerance
         lower = (active < 0) & (numpy.abs(x - values.lower_bounds) <= tolerance)
         upper = (active > 0) & (numpy.abs(x - values.upper_bounds) <= tolerance)
         return cast(numpy.ndarray, lower | upper)
 
     def _removable_bound(self, values: ModelValues, x: numpy.ndarray, active: numpy.ndarray, fixed: numpy.ndarray, multipliers: numpy.ndarray) -> int | None:
+        """Select the reached bound with the worst invalid multiplier."""
         removable = self._geometrically_active(values, x, active) & ~fixed & (multipliers < -self.options.bound_tolerance)
         indices = numpy.flatnonzero(removable)
         if not indices.size:
@@ -539,6 +617,7 @@ class Solver:
         return int(indices[numpy.argmin(multipliers[indices])])
 
     def _blocking_bounds(self, x: numpy.ndarray, step: numpy.ndarray, values: ModelValues, active: numpy.ndarray) -> numpy.ndarray:
+        """Return all free bounds first reached by the proposed step."""
         tolerance = self.options.bound_tolerance
         fractions = numpy.full(self.nlp.dimension, numpy.inf)
         free = active == 0
@@ -546,6 +625,7 @@ class Solver:
         toward_lower = free & (step < -tolerance) & numpy.isfinite(values.lower_bounds)
         fractions[toward_upper] = (values.upper_bounds[toward_upper] - x[toward_upper]) / step[toward_upper]
         fractions[toward_lower] = (values.lower_bounds[toward_lower] - x[toward_lower]) / step[toward_lower]
+
         first = float(numpy.min(fractions))
         if not numpy.isfinite(first) or first > 1.0 + tolerance:
             return numpy.empty(0, dtype=int)
@@ -553,11 +633,13 @@ class Solver:
         return numpy.flatnonzero(numpy.abs(fractions - first) <= tie_tolerance)
 
     def _box_feasible(self, x: numpy.ndarray, values: ModelValues) -> bool:
+        """Check the invariant required before evaluating a filter candidate."""
         tolerance = self.options.bound_tolerance
         return bool(numpy.all(x >= values.lower_bounds - tolerance) and numpy.all(x <= values.upper_bounds + tolerance))
 
 
 def _boundary_distance(point: numpy.ndarray, direction: numpy.ndarray, radius: float) -> float:
+    """Return the nonnegative ray parameter intersecting a Euclidean ball."""
     a = float(direction @ direction)
 
     if a == 0.0:
@@ -570,6 +652,7 @@ def _boundary_distance(point: numpy.ndarray, direction: numpy.ndarray, radius: f
 
 
 def _equality_violation(values: ModelValues) -> float:
+    """Return the filter's infinity-norm feasibility measure."""
     return float(numpy.max(numpy.abs(values.equalities))) if values.equalities.size else 0.0
 
 

@@ -92,15 +92,17 @@ class SparseLDLProgram:
         diagonal = numpy.empty(n)
 
         for k, column in enumerate(self.columns):
-            diagonal[k] = permuted[k, k] - sum(lower[k, j] * lower[k, j] * diagonal[j] for j in column.diagonal_terms)
+            # Numeric LDL follows the fill schedule found during generation.
+            diagonal_update = sum(lower[k, j] ** 2 * diagonal[j] for j in column.diagonal_terms)
+            diagonal[k] = permuted[k, k] - diagonal_update
 
             if not numpy.isfinite(diagonal[k]) or diagonal[k] <= tolerance:
                 message = f"non-positive LDL pivot {k}: {diagonal[k]}"
                 raise numpy.linalg.LinAlgError(message)
 
             for i, common in column.rows:
-                value = permuted[i, k] - sum(lower[i, j] * lower[k, j] * diagonal[j] for j in common)
-                lower[i, k] = value / diagonal[k]
+                row_update = sum(lower[i, j] * lower[k, j] * diagonal[j] for j in common)
+                lower[i, k] = (permuted[i, k] - row_update) / diagonal[k]
 
         return LDLFactor(self, lower, diagonal)
 
@@ -133,6 +135,7 @@ class LDLFactor:
         work = numpy.asarray(rhs, dtype=float)[permutation].copy()
         n = len(work)
 
+        # Solve L z = P b, D y = z, and L.T w = y.
         for i in range(n):
             work[i] -= self.lower[i, :i] @ work[:i]
 
@@ -180,20 +183,23 @@ class GeneratedProgram:
 
     def __init__(self, nlp: NonlinearProgram) -> None:
         self.nlp = nlp
+
+        # Derivatives remain symbolic until this evaluator is instantiated.
         variables = sympy.ImmutableDenseMatrix(nlp.dimension, 1, nlp.x)
         equalities = sympy.ImmutableDenseMatrix(nlp.equality_dimension, 1, nlp.g)
         objective = nlp.f
         gradient = sympy.ImmutableDenseMatrix([sympy.diff(objective, item) for item in nlp.x])
         hessian = sympy.ImmutableDenseMatrix(sympy.hessian(objective, nlp.x))
         jacobian = sympy.ImmutableDenseMatrix(equalities.jacobian(variables)) if nlp.equality_dimension else sympy.ImmutableDenseMatrix.zeros(0, nlp.dimension)
+
         self.ir = EvaluatorIR(
-            objective,
-            equalities,
-            gradient,
-            hessian,
-            jacobian,
-            sympy.ImmutableDenseMatrix(nlp.dimension, 1, nlp.lb),
-            sympy.ImmutableDenseMatrix(nlp.dimension, 1, nlp.ub),
+            objective=objective,
+            equalities=equalities,
+            gradient=gradient,
+            hessian=hessian,
+            equality_jacobian=jacobian,
+            lower_bounds=sympy.ImmutableDenseMatrix(nlp.dimension, 1, nlp.lb),
+            upper_bounds=sympy.ImmutableDenseMatrix(nlp.dimension, 1, nlp.ub),
         )
         expressions = (
             objective,
@@ -205,13 +211,10 @@ class GeneratedProgram:
             self.ir.upper_bounds,
         )
         self._evaluator = sympy.lambdify((*nlp.x, *nlp.parameters), expressions, modules="numpy", cse=True)
-        self.jacobian_pattern = tuple(tuple(not _structurally_zero(jacobian[i, j]) for j in range(nlp.dimension)) for i in range(nlp.equality_dimension))
-        self.gram_contributions = tuple(
-            (i, j, tuple(k for k in range(nlp.dimension) if self.jacobian_pattern[i][k] and self.jacobian_pattern[j][k]))
-            for i in range(nlp.equality_dimension)
-            for j in range(i + 1)
-            if i == j or any(self.jacobian_pattern[i][k] and self.jacobian_pattern[j][k] for k in range(nlp.dimension))
-        )
+
+        # Only free columns shared by two equality rows contribute to E_F E_F.T.
+        self.jacobian_pattern = _jacobian_pattern(jacobian)
+        self.gram_contributions = _gram_contributions(self.jacobian_pattern)
         gram_pattern = _gram_pattern(self.jacobian_pattern)
         permutation = _minimum_degree_order(gram_pattern)
         self.ldl = _ldl_program(gram_pattern, permutation)
@@ -227,6 +230,7 @@ class GeneratedProgram:
         gram = numpy.zeros((m, m))
 
         for i, j, columns in self.gram_contributions:
+            # The active box set appears only through this free-column mask.
             value = sum(jacobian[i, k] * jacobian[j, k] for k in columns if free[k])
             gram[i, j] = gram[j, i] = value
 
@@ -241,13 +245,13 @@ class GeneratedProgram:
         n = self.nlp.dimension
         m = self.nlp.equality_dimension
         values = ModelValues(
-            float(numpy.asarray(raw[0]).reshape(())),
-            numpy.asarray(raw[1], dtype=float).reshape(m),
-            numpy.asarray(raw[2], dtype=float).reshape(n),
-            numpy.asarray(raw[3], dtype=float).reshape(n, n),
-            numpy.asarray(raw[4], dtype=float).reshape(m, n),
-            numpy.asarray(raw[5], dtype=float).reshape(n),
-            numpy.asarray(raw[6], dtype=float).reshape(n),
+            objective=float(numpy.asarray(raw[0]).reshape(())),
+            equalities=numpy.asarray(raw[1], dtype=float).reshape(m),
+            gradient=numpy.asarray(raw[2], dtype=float).reshape(n),
+            hessian=numpy.asarray(raw[3], dtype=float).reshape(n, n),
+            equality_jacobian=numpy.asarray(raw[4], dtype=float).reshape(m, n),
+            lower_bounds=numpy.asarray(raw[5], dtype=float).reshape(n),
+            upper_bounds=numpy.asarray(raw[6], dtype=float).reshape(n),
         )
 
         if numpy.any(values.lower_bounds > values.upper_bounds):
@@ -277,6 +281,23 @@ def _structurally_zero(expression: sympy.Expr) -> bool:
     return expression == 0 or expression.is_zero is True
 
 
+def _jacobian_pattern(jacobian: sympy.ImmutableDenseMatrix) -> tuple[tuple[bool, ...], ...]:
+    rows, columns = jacobian.shape
+    return tuple(tuple(not _structurally_zero(jacobian[i, j]) for j in range(columns)) for i in range(rows))
+
+
+def _gram_contributions(jacobian: tuple[tuple[bool, ...], ...]) -> tuple[tuple[int, int, tuple[int, ...]], ...]:
+    contributions: list[tuple[int, int, tuple[int, ...]]] = []
+
+    for i, row_i in enumerate(jacobian):
+        for j, row_j in enumerate(jacobian[: i + 1]):
+            shared_columns = tuple(k for k, (left, right) in enumerate(zip(row_i, row_j, strict=True)) if left and right)
+            if i == j or shared_columns:
+                contributions.append((i, j, shared_columns))
+
+    return tuple(contributions)
+
+
 def _gram_pattern(jacobian: tuple[tuple[bool, ...], ...]) -> tuple[tuple[bool, ...], ...]:
     m = len(jacobian)
 
@@ -292,6 +313,7 @@ def _minimum_degree_order(pattern: tuple[tuple[bool, ...], ...]) -> tuple[int, .
     order: list[int] = []
 
     while remaining:
+        # Eliminate the least connected row; connect its future neighbors.
         node = min(remaining, key=lambda item: (len(graph[item] & remaining), item))
         neighbors = list(graph[node] & remaining)
 
@@ -315,6 +337,7 @@ def _ldl_program(pattern: tuple[tuple[bool, ...], ...], permutation: tuple[int, 
             filled[i][j] = pattern[permutation[i]][permutation[j]]
 
     for k in range(n):
+        # Symbolic elimination adds the clique induced by column k.
         neighbors = [i for i in range(k + 1, n) if filled[i][k]]
 
         for offset, left in enumerate(neighbors):
@@ -332,6 +355,6 @@ def _ldl_program(pattern: tuple[tuple[bool, ...], ...], permutation: tuple[int, 
                 common = tuple(j for j in range(k) if filled[i][j] and filled[k][j])
                 rows.append((i, common))
 
-        columns.append(LDLColumn(diagonal_terms, tuple(rows)))
+        columns.append(LDLColumn(diagonal_terms=diagonal_terms, rows=tuple(rows)))
 
     return SparseLDLProgram(permutation, tuple(tuple(row) for row in filled), tuple(columns))
