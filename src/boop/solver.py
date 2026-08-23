@@ -18,8 +18,6 @@ class Procedure(StrEnum):
     ACTIVE_SET_UPDATE = "active-set-update"
     BYRD_OMOJOKUN_SOC = "byrd-omojukun-soc"
     BYRD_OMOJOKUN = "byrd-omojukun"
-    PROJECTED_GRADIENT = "projected-gradient"
-    CAUCHY = "cauchy"
     REJECTED = "rejected"
 
 
@@ -267,33 +265,37 @@ class _Linearization:
 
 @dataclass(slots=True)
 class _Step:
-    """Bundle the primary Byrd--Omojokun step and its fallback steps.
+    """Bundle the normal and tangential components of the primary step.
 
     Attributes
     ----------
     compound
         Sum of the normal and tangential steps.
-    correction
-        Second-order correction to the compound step.
-    projected_gradient
-        Projected-gradient fallback step.
-    cauchy
-        Constraint-model Cauchy fallback step.
-    normal_norm
-        Euclidean norm of the normal step.
-    tangential_norm
-        Euclidean norm of the tangential step.
     """
 
     compound: numpy.ndarray
     normal: numpy.ndarray
     tangential: numpy.ndarray
-    correction: numpy.ndarray
-    projected_gradient: numpy.ndarray
-    cauchy: numpy.ndarray
-    normal_norm: float
-    tangential_norm: float
     cg: CGDiagnostics
+
+
+@dataclass(slots=True)
+class _Candidate:
+    """Bundle an evaluated step offered to the filter.
+
+    Attributes
+    ----------
+    procedure
+        Construction used for the candidate.
+    step
+        Displacement from the current iterate.
+    values
+        NLP evaluation at the candidate point.
+    """
+
+    procedure: Procedure
+    step: numpy.ndarray
+    values: ModelValues
 
 
 class _Filter:
@@ -445,6 +447,7 @@ class Solver:
                         trust_radius_after=trust_radius,
                         linearization=linearization,
                         step=None,
+                        correction_step=numpy.zeros_like(x),
                         accepted_step=numpy.zeros_like(x),
                         equality_multipliers=equality_multipliers.copy(),
                         bound_multipliers=bound_multipliers.copy(),
@@ -457,7 +460,7 @@ class Solver:
                 )
                 continue
 
-            step = self._step(x, params, linearization, projected_gradient, trust_radius)
+            step = self._step(x, linearization, trust_radius)
             blocking = self._blocking_bounds(x, step.compound, current, active)
 
             if blocking.size:
@@ -479,6 +482,7 @@ class Solver:
                         trust_radius_after=trust_radius,
                         linearization=linearization,
                         step=step,
+                        correction_step=numpy.zeros_like(x),
                         accepted_step=numpy.zeros_like(x),
                         equality_multipliers=equality_multipliers.copy(),
                         bound_multipliers=bound_multipliers.copy(),
@@ -491,17 +495,12 @@ class Solver:
                 )
                 continue
 
-            # SOC is optional; fallbacks are offered only when box feasible.
-            attempts = []
-            corrected = step.compound + step.correction
-            if self._meaningful_step(x, corrected) and self._box_feasible(x + corrected, current):
-                attempts.append((Procedure.BYRD_OMOJOKUN_SOC, corrected))
-            if self._meaningful_step(x, step.compound):
-                attempts.append((Procedure.BYRD_OMOJOKUN, step.compound))
-            if self._meaningful_step(x, step.projected_gradient) and self._box_feasible(x + step.projected_gradient, current):
-                attempts.append((Procedure.PROJECTED_GRADIENT, step.projected_gradient))
-            if self._meaningful_step(x, step.cauchy) and self._box_feasible(x + step.cauchy, current):
-                attempts.append((Procedure.CAUCHY, step.cauchy))
+            # Evaluate BO once; nonlinear equalities add one corrected candidate.
+            bo_values = self.program.evaluate(x + step.compound, params)
+            correction = numpy.zeros_like(x)
+            if self.program.has_nonlinear_equalities:
+                correction = self._second_order_correction(x, step.compound, bo_values, linearization, trust_radius)
+            candidates = self._candidates(x, step.compound, correction, bo_values, params)
             accepted = False
             chosen_procedure = Procedure.REJECTED
             chosen_step = numpy.zeros_like(x)
@@ -509,16 +508,14 @@ class Solver:
             chosen_x = x
             trial_diagnostics = []
 
-            for procedure, trial_step in attempts:
-                trial_x = x + trial_step
-                trial = self.program.evaluate(trial_x, params)
-                trial_violation = _equality_violation(trial)
-                filter_accepted = candidate_filter.accepts(trial.objective, trial_violation)
+            for candidate in candidates:
+                trial_violation = _equality_violation(candidate.values)
+                filter_accepted = candidate_filter.accepts(candidate.values.objective, trial_violation)
                 trial_diagnostics.append(
                     TrialDiagnostics(
-                        procedure=procedure,
-                        step=trial_step.copy(),
-                        objective=trial.objective,
+                        procedure=candidate.procedure,
+                        step=candidate.step.copy(),
+                        objective=candidate.values.objective,
                         violation=trial_violation,
                         filter_accepted=filter_accepted,
                     )
@@ -526,10 +523,10 @@ class Solver:
 
                 if filter_accepted:
                     accepted = True
-                    chosen_procedure = procedure
-                    chosen_step = trial_step
-                    chosen_values = trial
-                    chosen_x = trial_x
+                    chosen_procedure = candidate.procedure
+                    chosen_step = candidate.step
+                    chosen_values = candidate.values
+                    chosen_x = x + candidate.step
                     break
 
             if accepted:
@@ -555,6 +552,7 @@ class Solver:
                     trust_radius_after=trust_radius,
                     linearization=linearization,
                     step=step,
+                    correction_step=correction,
                     accepted_step=chosen_step if accepted else numpy.zeros_like(x),
                     equality_multipliers=equality_multipliers.copy(),
                     bound_multipliers=bound_multipliers.copy(),
@@ -581,6 +579,7 @@ class Solver:
         trust_radius_after: float,
         linearization: _Linearization,
         step: _Step | None,
+        correction_step: numpy.ndarray,
         accepted_step: numpy.ndarray,
         equality_multipliers: numpy.ndarray,
         bound_multipliers: numpy.ndarray,
@@ -594,7 +593,6 @@ class Solver:
         zero = numpy.zeros(self.nlp.dimension)
         normal = zero if step is None else step.normal
         tangential = zero if step is None else step.tangential
-        correction = zero if step is None else step.correction
         cg = _empty_cg() if step is None else step.cg
 
         stationarity = current.gradient + current.equality_jacobian.T @ equality_multipliers
@@ -616,7 +614,7 @@ class Solver:
             trust_radius=trust_radius_after,
             normal_step_norm=float(numpy.linalg.norm(normal)),
             tangential_step_norm=float(numpy.linalg.norm(tangential)),
-            correction_step_norm=float(numpy.linalg.norm(correction)),
+            correction_step_norm=float(numpy.linalg.norm(correction_step)),
             active_bounds=active.copy(),
             active_bounds_before=model_active.copy(),
             equality_multipliers=equality_multipliers.copy(),
@@ -637,7 +635,7 @@ class Solver:
             ldl_max_pivot=float(numpy.max(pivots)) if pivots.size else numpy.nan,
             normal_step=normal.copy(),
             tangential_step=tangential.copy(),
-            correction_step=correction.copy(),
+            correction_step=correction_step.copy(),
             accepted_step=accepted_step.copy(),
             cg=cg,
             trials=trials,
@@ -684,12 +682,10 @@ class Solver:
     def _step(
         self,
         x: numpy.ndarray,
-        parameters: numpy.ndarray,
         linearization: _Linearization,
-        projected_gradient: numpy.ndarray,
         trust_radius: float,
     ) -> _Step:
-        """Construct the Byrd--Omojokun step and inexpensive fallbacks."""
+        """Construct the primary Byrd--Omojokun step."""
         values = linearization.values
         normal = self._normal_step(x, linearization)
         normal_norm = float(numpy.linalg.norm(normal))
@@ -704,19 +700,10 @@ class Solver:
         tangent, cg = self._steihaug(gradient_at_normal, values.hessian, linearization, tangential_radius)
         compound = normal + tangent
 
-        correction = self._second_order_correction(x, compound, parameters, linearization, trust_radius)
-        projected_gradient_step = self._projected_gradient_step(projected_gradient, values.gradient, trust_radius)
-        cauchy = self._cauchy_step(x, linearization, trust_radius)
-
         return _Step(
             compound=compound,
             normal=normal,
             tangential=tangent,
-            correction=correction,
-            projected_gradient=projected_gradient_step,
-            cauchy=cauchy,
-            normal_norm=normal_norm,
-            tangential_norm=float(numpy.linalg.norm(tangent)),
             cg=cg,
         )
 
@@ -742,14 +729,13 @@ class Solver:
         self,
         x: numpy.ndarray,
         compound: numpy.ndarray,
-        parameters: numpy.ndarray,
+        trial: ModelValues,
         linearization: _Linearization,
         trust_radius: float,
     ) -> numpy.ndarray:
         """Correct nonlinear equality error left by the linearized step."""
         values = linearization.values
         trial_x = x + compound
-        trial = self.program.evaluate(trial_x, parameters)
         correction = numpy.zeros_like(x)
         lower_active = linearization.active < 0
         upper_active = linearization.active > 0
@@ -768,54 +754,27 @@ class Solver:
 
         return correction
 
-    def _projected_gradient_step(self, projected_gradient: numpy.ndarray, gradient: numpy.ndarray, trust_radius: float) -> numpy.ndarray:
-        """Return a trust-boundary descent fallback in the tangent space."""
-        step = -projected_gradient.copy()
-        norm = float(numpy.linalg.norm(step))
-        gradient_scale = max(1.0, float(numpy.linalg.norm(gradient)))
+    def _candidates(
+        self,
+        x: numpy.ndarray,
+        compound: numpy.ndarray,
+        correction: numpy.ndarray,
+        bo_values: ModelValues,
+        parameters: numpy.ndarray,
+    ) -> list[_Candidate]:
+        """Evaluate the fixed SOC-first trial sequence for this NLP."""
+        candidates = []
 
-        if norm <= self.options.active_set_stationarity_tolerance * gradient_scale:
-            return numpy.zeros_like(step)
+        if self.program.has_nonlinear_equalities:
+            corrected = compound + correction
+            soc_values = self.program.evaluate(x + corrected, parameters)
+            if self._meaningful_step(x, corrected) and self._box_feasible(x + corrected, bo_values):
+                candidates.append(_Candidate(Procedure.BYRD_OMOJOKUN_SOC, corrected, soc_values))
 
-        step *= trust_radius / norm
-        return step
+        if self._meaningful_step(x, compound):
+            candidates.append(_Candidate(Procedure.BYRD_OMOJOKUN, compound, bo_values))
 
-    def _cauchy_step(self, x: numpy.ndarray, linearization: _Linearization, trust_radius: float) -> numpy.ndarray:
-        """Minimize the linearized constraint norm along steepest descent."""
-        values = linearization.values
-        active_indices = numpy.flatnonzero(linearization.active)
-        residual = numpy.concatenate(
-            (
-                values.equalities,
-                numpy.where(
-                    linearization.active[active_indices] < 0,
-                    x[active_indices] - values.lower_bounds[active_indices],
-                    x[active_indices] - values.upper_bounds[active_indices],
-                ),
-            )
-        )
-        if residual.size == 0:
-            return numpy.zeros_like(x)
-
-        # Add coordinate rows for the active box constraints.
-        jacobian = numpy.vstack(
-            (
-                values.equality_jacobian,
-                numpy.eye(self.nlp.dimension)[active_indices],
-            )
-        )
-        gradient = jacobian.T @ residual
-        image = jacobian @ gradient
-        denominator = float(image @ image)
-
-        if denominator <= numpy.finfo(float).eps:
-            return numpy.zeros_like(x)
-
-        step = -(float(gradient @ gradient) / denominator) * gradient
-        norm = float(numpy.linalg.norm(step))
-        if norm > trust_radius:
-            step *= trust_radius / norm
-        return cast(numpy.ndarray, step)
+        return candidates
 
     def _steihaug(
         self,

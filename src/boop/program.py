@@ -215,6 +215,8 @@ class GeneratedProgram:
 
         # Only free columns shared by two equality rows contribute to E_F E_F.T.
         self.jacobian_pattern = _jacobian_pattern(jacobian)
+        variables_set = set(nlp.x)
+        self.has_nonlinear_equalities = any(entry.free_symbols & variables_set for entry in jacobian)
         self.gram_contributions = _gram_contributions(self.jacobian_pattern)
         gram_pattern = _gram_pattern(self.jacobian_pattern)
         permutation = _minimum_degree_order(gram_pattern)

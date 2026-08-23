@@ -21,6 +21,7 @@ def test_equality_constrained_quadratic() -> None:
     numpy.testing.assert_allclose(result.x, [0.5, 0.5], atol=1e-8)
     assert len(result.diagnostics.iterations) == 6
     assert result.diagnostics.iterations[0].accepted
+    assert all(trial.procedure == Procedure.BYRD_OMOJOKUN for iteration in result.diagnostics.iterations for trial in iteration.trials)
 
 
 def test_active_upper_bound_is_identified_and_enforced() -> None:
@@ -110,3 +111,4 @@ def test_nonlinear_equality_with_second_order_correction() -> None:
     )([0.8, 0.4], diagnostics=True)
     numpy.testing.assert_allclose(result.x, [numpy.sqrt(0.5), 0.5], atol=2e-5)
     assert abs(result.x[0] ** 2 + result.x[1] - 1.0) < 1e-10
+    assert any(trial.procedure == Procedure.BYRD_OMOJOKUN_SOC for iteration in result.diagnostics.iterations for trial in iteration.trials)
