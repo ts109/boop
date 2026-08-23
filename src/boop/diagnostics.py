@@ -130,11 +130,11 @@ def _print_iteration(stream: TextIO, index: int, item: IterationDiagnostics, pre
         file=stream,
     )
     print(
-        f"Hessian eigenvalues    : min={_scalar(item.hessian_min_eigenvalue, precision)}, max={_scalar(item.hessian_max_eigenvalue, precision)}",
+        f"Hessian diagonal       : min={_scalar(item.hessian_min_diagonal, precision)}, max={_scalar(item.hessian_max_diagonal, precision)}",
         file=stream,
     )
     print(
-        f"equality linear algebra: cond={_scalar(item.gram_condition, precision)}, LDL pivots=[{_scalar(item.ldl_min_pivot, precision)}, {_scalar(item.ldl_max_pivot, precision)}]",
+        f"equality LDL pivots    : [{_scalar(item.ldl_min_pivot, precision)}, {_scalar(item.ldl_max_pivot, precision)}]",
         file=stream,
     )
     print(
@@ -153,7 +153,8 @@ def _print_iteration(stream: TextIO, index: int, item: IterationDiagnostics, pre
         f"radius={_scalar(item.cg.radius, precision)}, "
         f"residual={_scalar(item.cg.initial_residual_norm, precision)} -> "
         f"{_scalar(item.cg.final_residual_norm, precision)}, "
-        f"last curvature={_optional_scalar(item.cg.final_curvature, precision)}",
+        f"last curvature={_optional_scalar(item.cg.final_curvature, precision)}, "
+        f"Rayleigh quotient={_optional_scalar(item.cg.final_rayleigh_quotient, precision)}",
         file=stream,
     )
     print(f"filter entries         : {item.filter_entries_before} -> {item.filter_entries_after}", file=stream)
@@ -194,7 +195,7 @@ def _diagnostic_flags(iterations: list[IterationDiagnostics]) -> list[str]:
     transitions = sum(item.procedure.value == "active-set-update" for item in iterations)
     negative_curvature = sum(item.cg.stop_reason.value == "negative-curvature" for item in iterations)
     cg_limits = sum(item.cg.stop_reason.value == "iteration-limit" for item in iterations)
-    worst_condition = max(item.gram_condition for item in iterations)
+    finite_pivot_ratios = [item.ldl_min_pivot / item.ldl_max_pivot for item in iterations if item.ldl_max_pivot > 0.0]
 
     if final.violation > 1e-6:
         flags.append(f"material final equality violation ({final.violation:.3g})")
@@ -208,8 +209,8 @@ def _diagnostic_flags(iterations: list[IterationDiagnostics]) -> list[str]:
         flags.append(f"negative curvature in {negative_curvature} CG solves")
     if cg_limits:
         flags.append(f"CG iteration limit reached {cg_limits} times")
-    if worst_condition > 1e10:
-        flags.append(f"ill-conditioned equality Gramian (worst cond {worst_condition:.3g})")
+    if finite_pivot_ratios and min(finite_pivot_ratios) < 1e-12:
+        flags.append(f"widely scaled equality LDL pivots (smallest ratio {min(finite_pivot_ratios):.3g})")
     if final.trust_radius < 1e-10:
         flags.append(f"collapsed trust radius ({final.trust_radius:.3g})")
     return flags or ["none detected by report heuristics"]

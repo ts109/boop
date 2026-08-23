@@ -1,5 +1,6 @@
 """Generated evaluator and sparse LDL program representation."""
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import cast
 
@@ -25,8 +26,6 @@ class EvaluatorIR:
         Objective-Hessian matrix.
     equality_jacobian
         Jacobian matrix of the equality residuals.
-    equality_hessians
-        Hessian matrix of each equality residual.
     lower_bounds
         Column matrix of variable lower-bound expressions.
     upper_bounds
@@ -38,7 +37,6 @@ class EvaluatorIR:
     gradient: sympy.ImmutableDenseMatrix
     hessian: sympy.ImmutableDenseMatrix
     equality_jacobian: sympy.ImmutableDenseMatrix
-    equality_hessians: tuple[sympy.ImmutableDenseMatrix, ...]
     lower_bounds: sympy.ImmutableDenseMatrix
     upper_bounds: sympy.ImmutableDenseMatrix
 
@@ -166,8 +164,6 @@ class ModelValues:
         Objective-Hessian matrix.
     equality_jacobian
         Equality-Jacobian matrix.
-    equality_hessians
-        Hessian of each equality residual.
     lower_bounds
         Evaluated variable lower bounds.
     upper_bounds
@@ -179,7 +175,6 @@ class ModelValues:
     gradient: numpy.ndarray
     hessian: numpy.ndarray
     equality_jacobian: numpy.ndarray
-    equality_hessians: numpy.ndarray
     lower_bounds: numpy.ndarray
     upper_bounds: numpy.ndarray
 
@@ -197,15 +192,12 @@ class GeneratedProgram:
         gradient = sympy.ImmutableDenseMatrix([sympy.diff(objective, item) for item in nlp.x])
         hessian = sympy.ImmutableDenseMatrix(sympy.hessian(objective, nlp.x))
         jacobian = sympy.ImmutableDenseMatrix(equalities.jacobian(variables)) if nlp.equality_dimension else sympy.ImmutableDenseMatrix.zeros(0, nlp.dimension)
-        equality_hessians = tuple(sympy.ImmutableDenseMatrix(sympy.hessian(item, nlp.x)) for item in nlp.g)
-
         self.ir = EvaluatorIR(
             objective=objective,
             equalities=equalities,
             gradient=gradient,
             hessian=hessian,
             equality_jacobian=jacobian,
-            equality_hessians=equality_hessians,
             lower_bounds=sympy.ImmutableDenseMatrix(nlp.dimension, 1, nlp.lb),
             upper_bounds=sympy.ImmutableDenseMatrix(nlp.dimension, 1, nlp.ub),
         )
@@ -215,11 +207,11 @@ class GeneratedProgram:
             gradient,
             hessian,
             jacobian,
-            equality_hessians,
             self.ir.lower_bounds,
             self.ir.upper_bounds,
         )
         self._evaluator = sympy.lambdify((*nlp.x, *nlp.parameters), expressions, modules="numpy", cse=True)
+        self._equality_hessian_evaluator: Callable[..., object] | None = None
 
         # Only free columns shared by two equality rows contribute to E_F E_F.T.
         self.jacobian_pattern = _jacobian_pattern(jacobian)
@@ -259,9 +251,8 @@ class GeneratedProgram:
             gradient=numpy.asarray(raw[2], dtype=float).reshape(n),
             hessian=numpy.asarray(raw[3], dtype=float).reshape(n, n),
             equality_jacobian=numpy.asarray(raw[4], dtype=float).reshape(m, n),
-            equality_hessians=numpy.asarray(raw[5], dtype=float).reshape(m, n, n),
-            lower_bounds=numpy.asarray(raw[6], dtype=float).reshape(n),
-            upper_bounds=numpy.asarray(raw[7], dtype=float).reshape(n),
+            lower_bounds=numpy.asarray(raw[5], dtype=float).reshape(n),
+            upper_bounds=numpy.asarray(raw[6], dtype=float).reshape(n),
         )
 
         if numpy.any(values.lower_bounds > values.upper_bounds):
@@ -274,7 +265,6 @@ class GeneratedProgram:
             values.gradient,
             values.hessian,
             values.equality_jacobian,
-            values.equality_hessians,
         )
 
         if not all(numpy.all(numpy.isfinite(item)) for item in arrays):
@@ -286,6 +276,19 @@ class GeneratedProgram:
             raise FloatingPointError(message)
 
         return values
+
+    def evaluate_equality_hessians(self, x: numpy.ndarray, parameters: numpy.ndarray) -> numpy.ndarray:
+        """Evaluate equality Hessians only when second-order validation needs them."""
+        if self._equality_hessian_evaluator is None:
+            expressions = tuple(sympy.ImmutableDenseMatrix(sympy.hessian(item, self.nlp.x)) for item in self.nlp.g)
+            self._equality_hessian_evaluator = sympy.lambdify(
+                (*self.nlp.x, *self.nlp.parameters),
+                expressions,
+                modules="numpy",
+                cse=True,
+            )
+        raw = self._equality_hessian_evaluator(*numpy.asarray(x, dtype=float), *numpy.asarray(parameters, dtype=float))
+        return numpy.asarray(raw, dtype=float).reshape(self.nlp.equality_dimension, self.nlp.dimension, self.nlp.dimension)
 
 
 def _structurally_zero(expression: sympy.Expr) -> bool:

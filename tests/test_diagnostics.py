@@ -26,7 +26,7 @@ def test_detailed_report_exposes_numerical_history() -> None:
     assert "Boop solver diagnostics" in report
     assert "initial projection norm" in report
     assert "diagnostic flags" in report
-    assert "equality linear algebra" in report
+    assert "equality LDL pivots" in report
     assert "Steihaug CG" in report
     assert "filter trials" in report
     assert "active lower / upper" in report

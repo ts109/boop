@@ -54,6 +54,8 @@ class CGDiagnostics:
         Norm of the last projected residual.
     final_curvature
         Directional curvature observed in the last CG iteration.
+    final_rayleigh_quotient
+        Last directional curvature divided by the squared direction norm.
     radius
         Tangential trust-region radius.
     """
@@ -63,6 +65,7 @@ class CGDiagnostics:
     initial_residual_norm: float
     final_residual_norm: float
     final_curvature: float | None
+    final_rayleigh_quotient: float | None
     radius: float
 
 
@@ -144,10 +147,9 @@ class IterationDiagnostics:
         Equality-nullspace gradient norm at the model point.
     stationarity_norm
         Primal-dual stationarity residual norm at the model point.
-    hessian_min_eigenvalue, hessian_max_eigenvalue
-        Extreme eigenvalues of the symmetric objective Hessian.
-    gram_condition
-        Condition number of the regularized free equality Gram matrix.
+    hessian_min_diagonal, hessian_max_diagonal
+        Extreme objective-Hessian diagonal entries. These are inexpensive
+        curvature hints, not eigenvalue bounds.
     ldl_min_pivot, ldl_max_pivot
         Extreme diagonal pivots in its LDL factorization.
     normal_step, tangential_step, correction_step
@@ -185,9 +187,8 @@ class IterationDiagnostics:
     gradient_norm: float
     projected_gradient_norm: float
     stationarity_norm: float
-    hessian_min_eigenvalue: float
-    hessian_max_eigenvalue: float
-    gram_condition: float
+    hessian_min_diagonal: float
+    hessian_max_diagonal: float
     ldl_min_pivot: float
     ldl_max_pivot: float
     normal_step: numpy.ndarray
@@ -418,7 +419,16 @@ class Solver:
             current = self.program.evaluate(x, params)
             linearization = self._linearize(current, active)
             equality_multipliers, bound_multipliers = self._multipliers(linearization)
-            removable = self._removable_bound(current, x, linearization, fixed, bound_multipliers)
+            projected_gradient = self._project(current.gradient, linearization)
+            projected_gradient_norm = float(numpy.linalg.norm(projected_gradient))
+            removable = self._removable_bound(
+                current,
+                x,
+                linearization,
+                fixed=fixed,
+                multipliers=bound_multipliers,
+                projected_gradient_norm=projected_gradient_norm,
+            )
 
             if removable is not None:
                 # Working-set changes consume a predictable outer iteration.
@@ -439,6 +449,7 @@ class Solver:
                         equality_multipliers=equality_multipliers.copy(),
                         bound_multipliers=bound_multipliers.copy(),
                         active=active,
+                        projected_gradient_norm=projected_gradient_norm,
                         trials=[],
                         filter_entries_before=filter_entries_before,
                         filter_entries_after=len(candidate_filter.entries),
@@ -446,7 +457,7 @@ class Solver:
                 )
                 continue
 
-            step = self._step(x, params, linearization, trust_radius)
+            step = self._step(x, params, linearization, projected_gradient, trust_radius)
             blocking = self._blocking_bounds(x, step.compound, current, active)
 
             if blocking.size:
@@ -472,6 +483,7 @@ class Solver:
                         equality_multipliers=equality_multipliers.copy(),
                         bound_multipliers=bound_multipliers.copy(),
                         active=active,
+                        projected_gradient_norm=projected_gradient_norm,
                         trials=[],
                         filter_entries_before=filter_entries_before,
                         filter_entries_after=len(candidate_filter.entries),
@@ -547,6 +559,7 @@ class Solver:
                     equality_multipliers=equality_multipliers.copy(),
                     bound_multipliers=bound_multipliers.copy(),
                     active=active,
+                    projected_gradient_norm=projected_gradient_norm,
                     trials=trial_diagnostics,
                     filter_entries_before=filter_entries_before,
                     filter_entries_after=len(candidate_filter.entries),
@@ -572,18 +585,18 @@ class Solver:
         equality_multipliers: numpy.ndarray,
         bound_multipliers: numpy.ndarray,
         active: numpy.ndarray,
+        projected_gradient_norm: float,
         trials: list[TrialDiagnostics],
         filter_entries_before: int,
         filter_entries_after: int,
     ) -> IterationDiagnostics:
-        """Collect expensive diagnostic measures outside the numerical path."""
+        """Collect diagnostic measures without matrix decompositions."""
         zero = numpy.zeros(self.nlp.dimension)
         normal = zero if step is None else step.normal
         tangential = zero if step is None else step.tangential
         correction = zero if step is None else step.correction
         cg = _empty_cg() if step is None else step.cg
 
-        projected_gradient = self._project(current.gradient, linearization)
         stationarity = current.gradient + current.equality_jacobian.T @ equality_multipliers
         stationarity = stationarity.copy()
         # Multipliers belong to the model working set, before any transition.
@@ -591,9 +604,8 @@ class Solver:
         stationarity[model_active < 0] -= bound_multipliers[model_active < 0]
         stationarity[model_active > 0] += bound_multipliers[model_active > 0]
 
-        hessian_eigenvalues = numpy.linalg.eigvalsh(current.hessian)
+        hessian_diagonal = numpy.diag(current.hessian)
         pivots = linearization.factor.diagonal
-        gram_condition = float(numpy.linalg.cond(linearization.gram)) if linearization.gram.size else 1.0
 
         return IterationDiagnostics(
             procedure=procedure,
@@ -617,11 +629,10 @@ class Solver:
             lower_bound_slack=x_after - result.lower_bounds,
             upper_bound_slack=result.upper_bounds - x_after,
             gradient_norm=float(numpy.linalg.norm(current.gradient)),
-            projected_gradient_norm=float(numpy.linalg.norm(projected_gradient)),
+            projected_gradient_norm=projected_gradient_norm,
             stationarity_norm=float(numpy.linalg.norm(stationarity)),
-            hessian_min_eigenvalue=float(numpy.min(hessian_eigenvalues)),
-            hessian_max_eigenvalue=float(numpy.max(hessian_eigenvalues)),
-            gram_condition=gram_condition,
+            hessian_min_diagonal=float(numpy.min(hessian_diagonal)),
+            hessian_max_diagonal=float(numpy.max(hessian_diagonal)),
             ldl_min_pivot=float(numpy.min(pivots)) if pivots.size else numpy.nan,
             ldl_max_pivot=float(numpy.max(pivots)) if pivots.size else numpy.nan,
             normal_step=normal.copy(),
@@ -670,7 +681,14 @@ class Solver:
         projected[linearization.free] = free_values
         return projected
 
-    def _step(self, x: numpy.ndarray, parameters: numpy.ndarray, linearization: _Linearization, trust_radius: float) -> _Step:
+    def _step(
+        self,
+        x: numpy.ndarray,
+        parameters: numpy.ndarray,
+        linearization: _Linearization,
+        projected_gradient: numpy.ndarray,
+        trust_radius: float,
+    ) -> _Step:
         """Construct the Byrd--Omojokun step and inexpensive fallbacks."""
         values = linearization.values
         normal = self._normal_step(x, linearization)
@@ -687,7 +705,7 @@ class Solver:
         compound = normal + tangent
 
         correction = self._second_order_correction(x, compound, parameters, linearization, trust_radius)
-        projected_gradient = self._projected_gradient_step(linearization, trust_radius)
+        projected_gradient_step = self._projected_gradient_step(projected_gradient, values.gradient, trust_radius)
         cauchy = self._cauchy_step(x, linearization, trust_radius)
 
         return _Step(
@@ -695,7 +713,7 @@ class Solver:
             normal=normal,
             tangential=tangent,
             correction=correction,
-            projected_gradient=projected_gradient,
+            projected_gradient=projected_gradient_step,
             cauchy=cauchy,
             normal_norm=normal_norm,
             tangential_norm=float(numpy.linalg.norm(tangent)),
@@ -750,11 +768,11 @@ class Solver:
 
         return correction
 
-    def _projected_gradient_step(self, linearization: _Linearization, trust_radius: float) -> numpy.ndarray:
+    def _projected_gradient_step(self, projected_gradient: numpy.ndarray, gradient: numpy.ndarray, trust_radius: float) -> numpy.ndarray:
         """Return a trust-boundary descent fallback in the tangent space."""
-        step = -self._project(linearization.values.gradient, linearization)
+        step = -projected_gradient.copy()
         norm = float(numpy.linalg.norm(step))
-        gradient_scale = max(1.0, float(numpy.linalg.norm(linearization.values.gradient)))
+        gradient_scale = max(1.0, float(numpy.linalg.norm(gradient)))
 
         if norm <= self.options.active_set_stationarity_tolerance * gradient_scale:
             return numpy.zeros_like(step)
@@ -810,7 +828,7 @@ class Solver:
         tangent = numpy.zeros(self.nlp.dimension)
 
         if radius <= numpy.finfo(float).eps:
-            return tangent, CGDiagnostics(0, CGStopReason.ZERO_RADIUS, 0.0, 0.0, None, radius)
+            return tangent, _empty_cg(radius)
 
         residual = -self._project(gradient, linearization)
         direction = residual.copy()
@@ -818,7 +836,15 @@ class Solver:
         initial_residual_norm = float(numpy.sqrt(residual_norm_sq))
 
         if residual_norm_sq <= numpy.finfo(float).eps:
-            return tangent, CGDiagnostics(0, CGStopReason.ZERO_RESIDUAL, initial_residual_norm, initial_residual_norm, None, radius)
+            return tangent, CGDiagnostics(
+                iterations=0,
+                stop_reason=CGStopReason.ZERO_RESIDUAL,
+                initial_residual_norm=initial_residual_norm,
+                final_residual_norm=initial_residual_norm,
+                final_curvature=None,
+                final_rayleigh_quotient=None,
+                radius=radius,
+            )
 
         hessian_norm = float(numpy.linalg.norm(hessian))
         curvature = None
@@ -834,12 +860,13 @@ class Solver:
                 # Negative curvature is useful only up to the trust boundary.
                 tangent += _boundary_distance(tangent, direction, radius) * direction
                 diagnostics = CGDiagnostics(
-                    iteration,
-                    CGStopReason.NEGATIVE_CURVATURE,
-                    initial_residual_norm,
-                    float(numpy.sqrt(residual_norm_sq)),
-                    curvature,
-                    radius,
+                    iterations=iteration,
+                    stop_reason=CGStopReason.NEGATIVE_CURVATURE,
+                    initial_residual_norm=initial_residual_norm,
+                    final_residual_norm=float(numpy.sqrt(residual_norm_sq)),
+                    final_curvature=curvature,
+                    final_rayleigh_quotient=curvature / direction_norm_sq,
+                    radius=radius,
                 )
                 return tangent, diagnostics
 
@@ -850,12 +877,13 @@ class Solver:
                 # Interpolate the current CG ray to the trust boundary.
                 tangent += _boundary_distance(tangent, direction, radius) * direction
                 diagnostics = CGDiagnostics(
-                    iteration,
-                    CGStopReason.TRUST_BOUNDARY,
-                    initial_residual_norm,
-                    float(numpy.sqrt(residual_norm_sq)),
-                    curvature,
-                    radius,
+                    iterations=iteration,
+                    stop_reason=CGStopReason.TRUST_BOUNDARY,
+                    initial_residual_norm=initial_residual_norm,
+                    final_residual_norm=float(numpy.sqrt(residual_norm_sq)),
+                    final_curvature=curvature,
+                    final_rayleigh_quotient=curvature / direction_norm_sq,
+                    radius=radius,
                 )
                 return tangent, diagnostics
 
@@ -865,12 +893,13 @@ class Solver:
 
             if new_norm_sq <= numpy.finfo(float).eps:
                 diagnostics = CGDiagnostics(
-                    iteration,
-                    CGStopReason.CONVERGED,
-                    initial_residual_norm,
-                    float(numpy.sqrt(new_norm_sq)),
-                    curvature,
-                    radius,
+                    iterations=iteration,
+                    stop_reason=CGStopReason.CONVERGED,
+                    initial_residual_norm=initial_residual_norm,
+                    final_residual_norm=float(numpy.sqrt(new_norm_sq)),
+                    final_curvature=curvature,
+                    final_rayleigh_quotient=curvature / direction_norm_sq,
+                    radius=radius,
                 )
                 return tangent, diagnostics
 
@@ -878,13 +907,15 @@ class Solver:
             residual = new_residual
             residual_norm_sq = new_norm_sq
 
+        assert curvature is not None
         diagnostics = CGDiagnostics(
-            self.options.cg_iterations,
-            CGStopReason.ITERATION_LIMIT,
-            initial_residual_norm,
-            float(numpy.sqrt(residual_norm_sq)),
-            curvature,
-            radius,
+            iterations=self.options.cg_iterations,
+            stop_reason=CGStopReason.ITERATION_LIMIT,
+            initial_residual_norm=initial_residual_norm,
+            final_residual_norm=float(numpy.sqrt(residual_norm_sq)),
+            final_curvature=curvature,
+            final_rayleigh_quotient=curvature / direction_norm_sq,
+            radius=radius,
         )
         return tangent, diagnostics
 
@@ -918,15 +949,16 @@ class Solver:
         values: ModelValues,
         x: numpy.ndarray,
         linearization: _Linearization,
+        *,
         fixed: numpy.ndarray,
         multipliers: numpy.ndarray,
+        projected_gradient_norm: float,
     ) -> int | None:
         """Release the worst invalid bound after optimizing its current face."""
         # Multiplier signs identify the correct neighboring face only after the
         # current face is stationary. This also prevents remove/re-add cycles.
-        projected_norm = float(numpy.linalg.norm(self._project(values.gradient, linearization)))
         gradient_scale = max(1.0, float(numpy.linalg.norm(values.gradient)))
-        if projected_norm > self.options.active_set_stationarity_tolerance * gradient_scale:
+        if projected_gradient_norm > self.options.active_set_stationarity_tolerance * gradient_scale:
             return None
 
         active = linearization.active
@@ -977,9 +1009,17 @@ def _boundary_distance(point: numpy.ndarray, direction: numpy.ndarray, radius: f
     return float(max(0.0, (-b + numpy.sqrt(discriminant)) / a))
 
 
-def _empty_cg() -> CGDiagnostics:
+def _empty_cg(radius: float = 0.0) -> CGDiagnostics:
     """Return the CG record used by iterations that construct no step."""
-    return CGDiagnostics(0, CGStopReason.ZERO_RADIUS, 0.0, 0.0, None, 0.0)
+    return CGDiagnostics(
+        iterations=0,
+        stop_reason=CGStopReason.ZERO_RADIUS,
+        initial_residual_norm=0.0,
+        final_residual_norm=0.0,
+        final_curvature=None,
+        final_rayleigh_quotient=None,
+        radius=radius,
+    )
 
 
 def _equality_violation(values: ModelValues) -> float:

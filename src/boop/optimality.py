@@ -135,7 +135,8 @@ def certify_local_minimum(  # noqa: PLR0915
 
     equality_rank = numpy.linalg.matrix_rank(values.equality_jacobian, tol=rank_tolerance)
     lagrangian_hessian = values.hessian.copy()
-    for multiplier, hessian in zip(equality_multipliers, values.equality_hessians, strict=True):
+    equality_hessians = solver.program.evaluate_equality_hessians(x, params)
+    for multiplier, hessian in zip(equality_multipliers, equality_hessians, strict=True):
         lagrangian_hessian += multiplier * hessian
 
     _, singular_values, right_vectors = numpy.linalg.svd(values.equality_jacobian, full_matrices=True)
