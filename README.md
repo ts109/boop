@@ -21,6 +21,21 @@ solver = create_solver(nlp, SolverOptions(sqp_iterations=20))
 solution = solver([0.8, 0.4])
 ```
 
+For a full numerical trace, request diagnostics and print the report:
+
+```python
+from boop import print_solver_diagnostics
+
+result = solver([0.8, 0.4], diagnostics=True)
+print_solver_diagnostics(result.diagnostics)
+```
+
+The report includes every attempted filter candidate, step component, working-
+set transition, multiplier estimate, Steihaug stopping reason, trust-radius
+change, equality factorization condition estimate, Hessian spectrum, and primal
+and stationarity residual. To print this report for every declarative benchmark,
+run `BOOP_TEST_DIAGNOSTICS=1 pytest -s tests/test_nlp_library.py`.
+
 The generated program contains SymPy expressions for the evaluator and a
 problem-specific sparse LDLᵀ schedule. At runtime Boop:
 

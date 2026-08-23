@@ -35,6 +35,9 @@ class SolverOptions:
     bound_tolerance
         Numerical tolerance for bound activity, blocking, and fixed-bound
         detection.
+    active_set_stationarity_tolerance
+        Relative face-stationarity tolerance required before an active bound
+        may be released based on its multiplier.
     """
 
     sqp_iterations: int = 20
@@ -49,6 +52,7 @@ class SolverOptions:
     filter_beta: float = 1e-2
     filter_gamma: float = 1e-5
     bound_tolerance: float = 1e-10
+    active_set_stationarity_tolerance: float = 1e-8
 
     def __post_init__(self) -> None:
         if self.sqp_iterations <= 0 or self.cg_iterations <= 0:
@@ -72,6 +76,7 @@ class SolverOptions:
                 self.filter_beta,
                 self.filter_gamma,
                 self.bound_tolerance,
+                self.active_set_stationarity_tolerance,
             )
             < 0.0
         ):

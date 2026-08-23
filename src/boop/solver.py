@@ -23,8 +23,72 @@ class Procedure(StrEnum):
     REJECTED = "rejected"
 
 
+class CGStopReason(StrEnum):
+    """Identify why projected Steihaug CG stopped."""
+
+    ZERO_RADIUS = "zero-radius"
+    ZERO_RESIDUAL = "zero-residual"
+    NEGATIVE_CURVATURE = "negative-curvature"
+    TRUST_BOUNDARY = "trust-boundary"
+    CONVERGED = "converged"
+    ITERATION_LIMIT = "iteration-limit"
+
+
 class ActiveSetError(RuntimeError):
     """Indicate that the bound working set is structurally invalid."""
+
+
+@dataclass(slots=True)
+class CGDiagnostics:
+    """Describe one projected Steihaug solve.
+
+    Attributes
+    ----------
+    iterations
+        Number of Hessian-vector products performed.
+    stop_reason
+        Numerical reason for terminating CG.
+    initial_residual_norm
+        Norm of the projected residual before the first iteration.
+    final_residual_norm
+        Norm of the last projected residual.
+    final_curvature
+        Directional curvature observed in the last CG iteration.
+    radius
+        Tangential trust-region radius.
+    """
+
+    iterations: int
+    stop_reason: CGStopReason
+    initial_residual_norm: float
+    final_residual_norm: float
+    final_curvature: float | None
+    radius: float
+
+
+@dataclass(slots=True)
+class TrialDiagnostics:
+    """Describe one box-feasible candidate offered to the filter.
+
+    Attributes
+    ----------
+    procedure
+        Step construction used for the candidate.
+    step
+        Full displacement from the current iterate.
+    objective
+        Candidate objective value.
+    violation
+        Candidate equality violation.
+    filter_accepted
+        Whether this candidate was accepted by the filter.
+    """
+
+    procedure: Procedure
+    step: numpy.ndarray
+    objective: float
+    violation: float
+    filter_accepted: bool
 
 
 @dataclass(slots=True)
@@ -55,10 +119,47 @@ class IterationDiagnostics:
     active_bounds
         Bound working set, using ``-1`` for lower, ``0`` for inactive, and
         ``1`` for upper bounds.
+    active_bounds_before
+        Bound working set used to form the model. This differs from
+        ``active_bounds`` during a working-set transition.
     equality_multipliers
         Estimated equality multipliers.
     bound_multipliers
         Estimated active-bound multipliers.
+    x_before
+        Iterate at which the quadratic model was formed.
+    trust_radius_before
+        Trust radius used to construct candidate steps.
+    objective_before
+        Objective value at the model point.
+    violation_before
+        Equality violation at the model point.
+    equality_residuals
+        Equality residual vector at the resulting iterate.
+    lower_bound_slack, upper_bound_slack
+        Signed distances from the resulting iterate to each box side.
+    gradient_norm
+        Objective-gradient norm at the model point.
+    projected_gradient_norm
+        Equality-nullspace gradient norm at the model point.
+    stationarity_norm
+        Primal-dual stationarity residual norm at the model point.
+    hessian_min_eigenvalue, hessian_max_eigenvalue
+        Extreme eigenvalues of the symmetric objective Hessian.
+    gram_condition
+        Condition number of the regularized free equality Gram matrix.
+    ldl_min_pivot, ldl_max_pivot
+        Extreme diagonal pivots in its LDL factorization.
+    normal_step, tangential_step, correction_step
+        Components produced by the Byrd--Omojokun construction.
+    accepted_step
+        Step committed to the iterate; zero after rejection or transition.
+    cg
+        Projected Steihaug diagnostic record.
+    trials
+        Box-feasible candidates evaluated by the filter in attempted order.
+    filter_entries_before, filter_entries_after
+        Filter sizes bracketing this iteration.
     """
 
     procedure: Procedure
@@ -71,8 +172,32 @@ class IterationDiagnostics:
     tangential_step_norm: float
     correction_step_norm: float
     active_bounds: numpy.ndarray
+    active_bounds_before: numpy.ndarray
     equality_multipliers: numpy.ndarray
     bound_multipliers: numpy.ndarray
+    x_before: numpy.ndarray
+    trust_radius_before: float
+    objective_before: float
+    violation_before: float
+    equality_residuals: numpy.ndarray
+    lower_bound_slack: numpy.ndarray
+    upper_bound_slack: numpy.ndarray
+    gradient_norm: float
+    projected_gradient_norm: float
+    stationarity_norm: float
+    hessian_min_eigenvalue: float
+    hessian_max_eigenvalue: float
+    gram_condition: float
+    ldl_min_pivot: float
+    ldl_max_pivot: float
+    normal_step: numpy.ndarray
+    tangential_step: numpy.ndarray
+    correction_step: numpy.ndarray
+    accepted_step: numpy.ndarray
+    cg: CGDiagnostics
+    trials: list[TrialDiagnostics]
+    filter_entries_before: int
+    filter_entries_after: int
 
 
 @dataclass(slots=True)
@@ -83,9 +208,18 @@ class SolverDiagnostics:
     ----------
     iterations
         Diagnostics in SQP iteration order.
+    initial_guess
+        Unmodified point supplied by the caller.
+    projected_initial_guess
+        Initial point after projection into the box.
+    parameters
+        Numerical parameter vector supplied to the generated evaluator.
     """
 
     iterations: list[IterationDiagnostics] = field(default_factory=list)
+    initial_guess: numpy.ndarray = field(default_factory=lambda: numpy.empty(0))
+    projected_initial_guess: numpy.ndarray = field(default_factory=lambda: numpy.empty(0))
+    parameters: numpy.ndarray = field(default_factory=lambda: numpy.empty(0))
 
 
 @dataclass(slots=True)
@@ -126,6 +260,7 @@ class _Linearization:
     active: numpy.ndarray
     free: numpy.ndarray
     free_jacobian: numpy.ndarray
+    gram: numpy.ndarray
     factor: LDLFactor
 
 
@@ -150,11 +285,14 @@ class _Step:
     """
 
     compound: numpy.ndarray
+    normal: numpy.ndarray
+    tangential: numpy.ndarray
     correction: numpy.ndarray
     projected_gradient: numpy.ndarray
     cauchy: numpy.ndarray
     normal_norm: float
     tangential_norm: float
+    cg: CGDiagnostics
 
 
 class _Filter:
@@ -232,6 +370,7 @@ class Solver:
     ) -> SolverResult:
         """Execute the fixed number of generated SQP iterations."""
         x = numpy.asarray(initial_guess, dtype=float).reshape(-1).copy()
+        supplied_initial_guess = x.copy()
         params = numpy.asarray(parameters, dtype=float).reshape(-1)
 
         if x.size != self.nlp.dimension:
@@ -260,32 +399,44 @@ class Solver:
         trust_radius = self.options.initial_trust_radius
         candidate_filter = _Filter(self.options.filter_beta, self.options.filter_gamma)
         candidate_filter.add_initial(initial.objective, _equality_violation(initial))
-        diagnostics = SolverDiagnostics()
+        diagnostics = SolverDiagnostics(
+            initial_guess=supplied_initial_guess,
+            projected_initial_guess=x.copy(),
+            parameters=params.copy(),
+        )
 
         for _ in range(self.options.sqp_iterations):
             # This factorization is shared by normal, tangential, and dual solves.
+            x_before = x.copy()
+            trust_radius_before = trust_radius
+            filter_entries_before = len(candidate_filter.entries)
             current = self.program.evaluate(x, params)
             linearization = self._linearize(current, active)
             equality_multipliers, bound_multipliers = self._multipliers(linearization)
-            removable = self._removable_bound(current, x, active, fixed, bound_multipliers)
+            removable = self._removable_bound(current, x, linearization, fixed, bound_multipliers)
 
             if removable is not None:
                 # Working-set changes consume a predictable outer iteration.
                 active[removable] = 0
                 diagnostics.iterations.append(
-                    IterationDiagnostics(
+                    self._iteration_diagnostics(
                         procedure=Procedure.ACTIVE_SET_UPDATE,
                         accepted=False,
-                        x=x.copy(),
-                        objective=current.objective,
-                        violation=_equality_violation(current),
-                        trust_radius=trust_radius,
-                        normal_step_norm=0.0,
-                        tangential_step_norm=0.0,
-                        correction_step_norm=0.0,
-                        active_bounds=active.copy(),
+                        x_before=x_before,
+                        x_after=x,
+                        current=current,
+                        result=current,
+                        trust_radius_before=trust_radius_before,
+                        trust_radius_after=trust_radius,
+                        linearization=linearization,
+                        step=None,
+                        accepted_step=numpy.zeros_like(x),
                         equality_multipliers=equality_multipliers.copy(),
                         bound_multipliers=bound_multipliers.copy(),
+                        active=active,
+                        trials=[],
+                        filter_entries_before=filter_entries_before,
+                        filter_entries_after=len(candidate_filter.entries),
                     )
                 )
                 continue
@@ -301,19 +452,24 @@ class Solver:
                     message = "blocking bounds overdetermined the working set"
                     raise ActiveSetError(message)
                 diagnostics.iterations.append(
-                    IterationDiagnostics(
+                    self._iteration_diagnostics(
                         procedure=Procedure.ACTIVE_SET_UPDATE,
                         accepted=False,
-                        x=x.copy(),
-                        objective=current.objective,
-                        violation=_equality_violation(current),
-                        trust_radius=trust_radius,
-                        normal_step_norm=step.normal_norm,
-                        tangential_step_norm=step.tangential_norm,
-                        correction_step_norm=float(numpy.linalg.norm(step.correction)),
-                        active_bounds=active.copy(),
+                        x_before=x_before,
+                        x_after=x,
+                        current=current,
+                        result=current,
+                        trust_radius_before=trust_radius_before,
+                        trust_radius_after=trust_radius,
+                        linearization=linearization,
+                        step=step,
+                        accepted_step=numpy.zeros_like(x),
                         equality_multipliers=equality_multipliers.copy(),
                         bound_multipliers=bound_multipliers.copy(),
+                        active=active,
+                        trials=[],
+                        filter_entries_before=filter_entries_before,
+                        filter_entries_after=len(candidate_filter.entries),
                     )
                 )
                 continue
@@ -333,13 +489,24 @@ class Solver:
             chosen_step = numpy.zeros_like(x)
             chosen_values = current
             chosen_x = x
+            trial_diagnostics = []
 
             for procedure, trial_step in attempts:
                 trial_x = x + trial_step
                 trial = self.program.evaluate(trial_x, params)
                 trial_violation = _equality_violation(trial)
+                filter_accepted = candidate_filter.accepts(trial.objective, trial_violation)
+                trial_diagnostics.append(
+                    TrialDiagnostics(
+                        procedure=procedure,
+                        step=trial_step.copy(),
+                        objective=trial.objective,
+                        violation=trial_violation,
+                        filter_accepted=filter_accepted,
+                    )
+                )
 
-                if candidate_filter.accepts(trial.objective, trial_violation):
+                if filter_accepted:
                     accepted = True
                     chosen_procedure = procedure
                     chosen_step = trial_step
@@ -359,23 +526,107 @@ class Solver:
 
             trust_radius = max(trust_radius, numpy.finfo(float).eps)
             diagnostics.iterations.append(
-                IterationDiagnostics(
+                self._iteration_diagnostics(
                     procedure=chosen_procedure,
                     accepted=accepted,
-                    x=x.copy(),
-                    objective=chosen_values.objective if accepted else current.objective,
-                    violation=_equality_violation(chosen_values) if accepted else _equality_violation(current),
-                    trust_radius=trust_radius,
-                    normal_step_norm=step.normal_norm,
-                    tangential_step_norm=step.tangential_norm,
-                    correction_step_norm=float(numpy.linalg.norm(step.correction)),
-                    active_bounds=active.copy(),
+                    x_before=x_before,
+                    x_after=x,
+                    current=current,
+                    result=chosen_values if accepted else current,
+                    trust_radius_before=trust_radius_before,
+                    trust_radius_after=trust_radius,
+                    linearization=linearization,
+                    step=step,
+                    accepted_step=chosen_step if accepted else numpy.zeros_like(x),
                     equality_multipliers=equality_multipliers.copy(),
                     bound_multipliers=bound_multipliers.copy(),
+                    active=active,
+                    trials=trial_diagnostics,
+                    filter_entries_before=filter_entries_before,
+                    filter_entries_after=len(candidate_filter.entries),
                 )
             )
 
         return SolverResult(x, diagnostics)
+
+    def _iteration_diagnostics(
+        self,
+        *,
+        procedure: Procedure,
+        accepted: bool,
+        x_before: numpy.ndarray,
+        x_after: numpy.ndarray,
+        current: ModelValues,
+        result: ModelValues,
+        trust_radius_before: float,
+        trust_radius_after: float,
+        linearization: _Linearization,
+        step: _Step | None,
+        accepted_step: numpy.ndarray,
+        equality_multipliers: numpy.ndarray,
+        bound_multipliers: numpy.ndarray,
+        active: numpy.ndarray,
+        trials: list[TrialDiagnostics],
+        filter_entries_before: int,
+        filter_entries_after: int,
+    ) -> IterationDiagnostics:
+        """Collect expensive diagnostic measures outside the numerical path."""
+        zero = numpy.zeros(self.nlp.dimension)
+        normal = zero if step is None else step.normal
+        tangential = zero if step is None else step.tangential
+        correction = zero if step is None else step.correction
+        cg = _empty_cg() if step is None else step.cg
+
+        projected_gradient = self._project(current.gradient, linearization)
+        stationarity = current.gradient + current.equality_jacobian.T @ equality_multipliers
+        stationarity = stationarity.copy()
+        # Multipliers belong to the model working set, before any transition.
+        model_active = linearization.active
+        stationarity[model_active < 0] -= bound_multipliers[model_active < 0]
+        stationarity[model_active > 0] += bound_multipliers[model_active > 0]
+
+        hessian_eigenvalues = numpy.linalg.eigvalsh(current.hessian)
+        pivots = linearization.factor.diagonal
+        gram_condition = float(numpy.linalg.cond(linearization.gram)) if linearization.gram.size else 1.0
+
+        return IterationDiagnostics(
+            procedure=procedure,
+            accepted=accepted,
+            x=x_after.copy(),
+            objective=result.objective,
+            violation=_equality_violation(result),
+            trust_radius=trust_radius_after,
+            normal_step_norm=float(numpy.linalg.norm(normal)),
+            tangential_step_norm=float(numpy.linalg.norm(tangential)),
+            correction_step_norm=float(numpy.linalg.norm(correction)),
+            active_bounds=active.copy(),
+            active_bounds_before=model_active.copy(),
+            equality_multipliers=equality_multipliers.copy(),
+            bound_multipliers=bound_multipliers.copy(),
+            x_before=x_before.copy(),
+            trust_radius_before=trust_radius_before,
+            objective_before=current.objective,
+            violation_before=_equality_violation(current),
+            equality_residuals=result.equalities.copy(),
+            lower_bound_slack=x_after - result.lower_bounds,
+            upper_bound_slack=result.upper_bounds - x_after,
+            gradient_norm=float(numpy.linalg.norm(current.gradient)),
+            projected_gradient_norm=float(numpy.linalg.norm(projected_gradient)),
+            stationarity_norm=float(numpy.linalg.norm(stationarity)),
+            hessian_min_eigenvalue=float(numpy.min(hessian_eigenvalues)),
+            hessian_max_eigenvalue=float(numpy.max(hessian_eigenvalues)),
+            gram_condition=gram_condition,
+            ldl_min_pivot=float(numpy.min(pivots)) if pivots.size else numpy.nan,
+            ldl_max_pivot=float(numpy.max(pivots)) if pivots.size else numpy.nan,
+            normal_step=normal.copy(),
+            tangential_step=tangential.copy(),
+            correction_step=correction.copy(),
+            accepted_step=accepted_step.copy(),
+            cg=cg,
+            trials=trials,
+            filter_entries_before=filter_entries_before,
+            filter_entries_after=filter_entries_after,
+        )
 
     def _linearize(self, values: ModelValues, active: numpy.ndarray) -> _Linearization:
         number_active = int(numpy.count_nonzero(active))
@@ -397,6 +648,7 @@ class Solver:
             active=active.copy(),
             free=free,
             free_jacobian=free_jacobian,
+            gram=gram,
             factor=factor,
         )
 
@@ -425,7 +677,7 @@ class Solver:
         # Orthogonality leaves this radius for motion in the nullspace.
         tangential_radius = float(numpy.sqrt(max(0.0, trust_radius * trust_radius - normal_norm * normal_norm)))
         gradient_at_normal = values.gradient + values.hessian @ normal
-        tangent = self._steihaug(gradient_at_normal, values.hessian, linearization, tangential_radius)
+        tangent, cg = self._steihaug(gradient_at_normal, values.hessian, linearization, tangential_radius)
         compound = normal + tangent
 
         correction = self._second_order_correction(x, compound, parameters, linearization, trust_radius)
@@ -434,11 +686,14 @@ class Solver:
 
         return _Step(
             compound=compound,
+            normal=normal,
+            tangential=tangent,
             correction=correction,
             projected_gradient=projected_gradient,
             cauchy=cauchy,
             normal_norm=normal_norm,
             tangential_norm=float(numpy.linalg.norm(tangent)),
+            cg=cg,
         )
 
     def _normal_step(self, x: numpy.ndarray, linearization: _Linearization) -> numpy.ndarray:
@@ -536,23 +791,31 @@ class Solver:
             step *= trust_radius / norm
         return cast(numpy.ndarray, step)
 
-    def _steihaug(self, gradient: numpy.ndarray, hessian: numpy.ndarray, linearization: _Linearization, radius: float) -> numpy.ndarray:
+    def _steihaug(
+        self,
+        gradient: numpy.ndarray,
+        hessian: numpy.ndarray,
+        linearization: _Linearization,
+        radius: float,
+    ) -> tuple[numpy.ndarray, CGDiagnostics]:
         """Approximately minimize the projected quadratic in a trust ball."""
         tangent = numpy.zeros(self.nlp.dimension)
 
         if radius <= numpy.finfo(float).eps:
-            return tangent
+            return tangent, CGDiagnostics(0, CGStopReason.ZERO_RADIUS, 0.0, 0.0, None, radius)
 
         residual = -self._project(gradient, linearization)
         direction = residual.copy()
         residual_norm_sq = float(residual @ residual)
+        initial_residual_norm = float(numpy.sqrt(residual_norm_sq))
 
         if residual_norm_sq <= numpy.finfo(float).eps:
-            return tangent
+            return tangent, CGDiagnostics(0, CGStopReason.ZERO_RESIDUAL, initial_residual_norm, initial_residual_norm, None, radius)
 
         hessian_norm = float(numpy.linalg.norm(hessian))
+        curvature = None
 
-        for _ in range(self.options.cg_iterations):
+        for iteration in range(1, self.options.cg_iterations + 1):
             # Projection implements P H P without materializing a nullspace basis.
             action = hessian @ direction + self.options.tangential_damping * hessian_norm * direction
             action = self._project(action, linearization)
@@ -561,27 +824,61 @@ class Solver:
 
             if curvature <= self.options.curvature_floor * direction_norm_sq:
                 # Negative curvature is useful only up to the trust boundary.
-                return tangent + _boundary_distance(tangent, direction, radius) * direction
+                tangent += _boundary_distance(tangent, direction, radius) * direction
+                diagnostics = CGDiagnostics(
+                    iteration,
+                    CGStopReason.NEGATIVE_CURVATURE,
+                    initial_residual_norm,
+                    float(numpy.sqrt(residual_norm_sq)),
+                    curvature,
+                    radius,
+                )
+                return tangent, diagnostics
 
             alpha = residual_norm_sq / curvature
             trial = tangent + alpha * direction
 
             if float(trial @ trial) >= radius * radius:
                 # Interpolate the current CG ray to the trust boundary.
-                return tangent + _boundary_distance(tangent, direction, radius) * direction
+                tangent += _boundary_distance(tangent, direction, radius) * direction
+                diagnostics = CGDiagnostics(
+                    iteration,
+                    CGStopReason.TRUST_BOUNDARY,
+                    initial_residual_norm,
+                    float(numpy.sqrt(residual_norm_sq)),
+                    curvature,
+                    radius,
+                )
+                return tangent, diagnostics
 
             tangent = trial
             new_residual = self._project(residual - alpha * action, linearization)
             new_norm_sq = float(new_residual @ new_residual)
 
             if new_norm_sq <= numpy.finfo(float).eps:
-                return tangent
+                diagnostics = CGDiagnostics(
+                    iteration,
+                    CGStopReason.CONVERGED,
+                    initial_residual_norm,
+                    float(numpy.sqrt(new_norm_sq)),
+                    curvature,
+                    radius,
+                )
+                return tangent, diagnostics
 
             direction = new_residual + (new_norm_sq / residual_norm_sq) * direction
             residual = new_residual
             residual_norm_sq = new_norm_sq
 
-        return tangent
+        diagnostics = CGDiagnostics(
+            self.options.cg_iterations,
+            CGStopReason.ITERATION_LIMIT,
+            initial_residual_norm,
+            float(numpy.sqrt(residual_norm_sq)),
+            curvature,
+            radius,
+        )
+        return tangent, diagnostics
 
     def _multipliers(self, linearization: _Linearization) -> tuple[numpy.ndarray, numpy.ndarray]:
         """Estimate equality and signed active-bound multipliers."""
@@ -608,8 +905,23 @@ class Solver:
         upper = (active > 0) & (numpy.abs(x - values.upper_bounds) <= tolerance)
         return cast(numpy.ndarray, lower | upper)
 
-    def _removable_bound(self, values: ModelValues, x: numpy.ndarray, active: numpy.ndarray, fixed: numpy.ndarray, multipliers: numpy.ndarray) -> int | None:
-        """Select the reached bound with the worst invalid multiplier."""
+    def _removable_bound(
+        self,
+        values: ModelValues,
+        x: numpy.ndarray,
+        linearization: _Linearization,
+        fixed: numpy.ndarray,
+        multipliers: numpy.ndarray,
+    ) -> int | None:
+        """Release the worst invalid bound after optimizing its current face."""
+        # Multiplier signs identify the correct neighboring face only after the
+        # current face is stationary. This also prevents remove/re-add cycles.
+        projected_norm = float(numpy.linalg.norm(self._project(values.gradient, linearization)))
+        gradient_scale = max(1.0, float(numpy.linalg.norm(values.gradient)))
+        if projected_norm > self.options.active_set_stationarity_tolerance * gradient_scale:
+            return None
+
+        active = linearization.active
         removable = self._geometrically_active(values, x, active) & ~fixed & (multipliers < -self.options.bound_tolerance)
         indices = numpy.flatnonzero(removable)
         if not indices.size:
@@ -649,6 +961,11 @@ def _boundary_distance(point: numpy.ndarray, direction: numpy.ndarray, radius: f
     discriminant = max(0.0, b * b + a * (radius * radius - float(point @ point)))
 
     return float(max(0.0, (-b + numpy.sqrt(discriminant)) / a))
+
+
+def _empty_cg() -> CGDiagnostics:
+    """Return the CG record used by iterations that construct no step."""
+    return CGDiagnostics(0, CGStopReason.ZERO_RADIUS, 0.0, 0.0, None, 0.0)
 
 
 def _equality_violation(values: ModelValues) -> float:

@@ -1,5 +1,8 @@
 """Readable library of small NLPs and an executable Boop benchmark."""
 
+import fnmatch
+import os
+import sys
 from statistics import median
 from time import perf_counter
 
@@ -7,7 +10,7 @@ import numpy
 import pytest
 import sympy
 
-from boop import NonlinearProgram, Solver, SolverOptions, create_solver
+from boop import NonlinearProgram, Solver, SolverOptions, create_solver, print_solver_diagnostics
 
 ProblemAndSolution = tuple[NonlinearProgram, numpy.ndarray]
 BenchmarkResult = tuple[str, int, int, int, float, float, int, float]
@@ -119,12 +122,6 @@ NLP_LIBRARY = {
 OPTIONS = SolverOptions()
 
 
-def initial_guess(solution: numpy.ndarray) -> numpy.ndarray:
-    """Move every component far from the known solution with alternating sign."""
-    signs = numpy.where(numpy.arange(solution.size) % 2, -1.0, 1.0)
-    return solution + 4.0 * signs
-
-
 def violation(solver: Solver, point: numpy.ndarray) -> float:
     """Return the infinity norm of all equality and bound violations."""
     values = solver.program.evaluate(point, numpy.empty(0))
@@ -145,17 +142,25 @@ def solve_and_validate(
     solver = create_solver(problem, OPTIONS)
     compile_seconds = perf_counter() - compile_start
 
+    rng = numpy.random.default_rng(abs(hash(name)))
+
     solve_seconds = []
     results = []
     for _ in range(repeats):
+        initial_guess = rng.normal(loc=solution, scale=numpy.fmax(1.0, abs(solution)))
+
         start = perf_counter()
-        results.append(solver(initial_guess(solution), diagnostics=True))
+        results.append(solver(initial_guess, diagnostics=True))
         solve_seconds.append(perf_counter() - start)
 
     result = results[-1]
-    for repeated in results[:-1]:
-        numpy.testing.assert_array_equal(repeated.x, result.x)
-    numpy.testing.assert_allclose(result.x, solution, atol=5e-4, rtol=0)
+    if os.getenv("BOOP_TEST_DIAGNOSTICS"):
+        print(f"\nDiagnostics for benchmark problem {name!r}")
+        print_solver_diagnostics(result.diagnostics)
+
+    for repeated in results:
+        numpy.testing.assert_allclose(repeated.x, solution, atol=1e-7)
+
     final_violation = violation(solver, result.x)
     assert final_violation <= 1e-7
     assert len(result.diagnostics.iterations) == OPTIONS.sqp_iterations
@@ -196,7 +201,21 @@ def test_nlp_library(name: str, problem_and_solution: ProblemAndSolution) -> Non
 
 def main() -> None:
     """Run the library and print its benchmark table."""
-    results = [solve_and_validate(name, problem, solution, repeats=3) for name, (problem, solution) in NLP_LIBRARY.items()]
+    match len(sys.argv):
+        case 1:
+            pattern = "*"
+        case 2:
+            pattern = sys.argv[1]
+        case _:
+            msg = "Unsupported number of arguments"
+            raise ValueError(msg)
+
+    results = []
+
+    for name, (problem, solution) in NLP_LIBRARY.items():
+        if fnmatch.fnmatch(name, pattern):
+            results.append(solve_and_validate(name, problem, solution, repeats=3))
+
     print("case                                    n  eq  bounds  compile_ms  solve_ms  accepted  violation")
     for name, n, equalities, bounds, compile_time, solve_time, accepted, final_violation in results:
         print(f"{name:37} {n:3d} {equalities:3d} {bounds:7d} {compile_time * 1e3:11.3f} {solve_time * 1e3:9.3f} {accepted:9d} {final_violation:10.2e}")

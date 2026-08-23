@@ -53,6 +53,24 @@ def test_blocking_bound_consumes_an_iteration_without_moving() -> None:
     numpy.testing.assert_allclose(result.x, [1.0])
 
 
+def test_bound_is_not_released_before_its_face_is_stationary() -> None:
+    """Finish the reduced solve before using multipliers to change faces."""
+    x, y = sympy.symbols("x y")
+    model = NonlinearProgram(
+        x=(x, y),
+        f=100 * (y - x**2) ** 2 + (1 - x) ** 2,
+        lb=(0, 1.5),
+    )
+    result = create_solver(model)([1.224958, 1.5], diagnostics=True)
+
+    numpy.testing.assert_allclose(result.x, [1.224370748736353, 1.5], atol=1e-10)
+    transitions = [item for item in result.diagnostics.iterations if item.procedure == Procedure.ACTIVE_SET_UPDATE]
+    assert len(transitions) == 1
+    assert transitions[0].active_bounds_before[1] == 0
+    assert transitions[0].active_bounds[1] == -1
+    assert result.diagnostics.iterations[-1].bound_multipliers[1] > 0.0
+
+
 def test_initial_guess_is_projected_onto_box() -> None:
     """Project an infeasible initial guess before the first SQP iteration."""
     x = sympy.symbols("x")
