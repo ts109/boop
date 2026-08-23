@@ -71,16 +71,16 @@ typedef struct {
   double filter_violation[BOOP_SQP_ITERATIONS + 1];
 } BoopWorkspace;
 
-BoopStatus boop_evaluate(const double *x, const double *parameters, BoopModel *model);
-void boop_assemble_gram(const BoopModel *model, const unsigned char *free_variables, double *gram);
+BoopStatus boop_evaluate(const double *x, const double *parameters,
+                         BoopModel *model);
+void boop_assemble_gram(const BoopModel *model,
+                        const unsigned char *free_variables, double *gram);
 BoopStatus boop_ldl_factor(const double *gram, double *lower, double *diagonal);
-void boop_ldl_solve(const double *lower, const double *diagonal, const double *rhs, double *solution);
+void boop_ldl_solve(const double *lower, const double *diagonal,
+                    const double *rhs, double *solution);
 
-BoopStatus boop_solve(
-    BoopWorkspace *workspace,
-    const double *initial_guess,
-    const double *parameters,
-    double *solution,
-    BoopDiagnostics *diagnostics);
+BoopStatus boop_solve(BoopWorkspace *workspace, const double *initial_guess,
+                      const double *parameters, double *solution,
+                      BoopDiagnostics *diagnostics);
 
 #endif
