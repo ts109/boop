@@ -135,14 +135,14 @@ def solve_and_validate(
     name: str,
     problem: NonlinearProgram,
     solution: numpy.ndarray,
-    repeats: int = 1,
+    repeats: int = 10,
 ) -> BenchmarkResult:
     """Compile, solve, validate, and benchmark one table entry."""
     compile_start = perf_counter()
     solver = create_solver(problem, OPTIONS)
     compile_seconds = perf_counter() - compile_start
 
-    rng = numpy.random.default_rng(abs(hash(name)))
+    rng = numpy.random.default_rng(sum(name.encode()))
 
     solve_seconds = []
     results = []
@@ -214,7 +214,7 @@ def main() -> None:
 
     for name, (problem, solution) in NLP_LIBRARY.items():
         if fnmatch.fnmatch(name, pattern):
-            results.append(solve_and_validate(name, problem, solution, repeats=3))
+            results.append(solve_and_validate(name, problem, solution))
 
     print("case                                    n  eq  bounds  compile_ms  solve_ms  accepted  violation")
     for name, n, equalities, bounds, compile_time, solve_time, accepted, final_violation in results:
