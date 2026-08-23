@@ -3,7 +3,6 @@
 #include <float.h>
 #include <math.h>
 #include <stdbool.h>
-#include <string.h>
 
 typedef struct {
   double normal[BOOP_N];
@@ -30,6 +29,29 @@ static double dot(int n, const double *a, const double *b) {
 }
 
 static double norm(int n, const double *a) { return sqrt(dot(n, a, a)); }
+
+static void zero_vector(double *values) {
+  for (int i = 0; i < BOOP_N; ++i)
+    values[i] = 0.0;
+}
+
+static void copy_vector(double *destination, const double *source) {
+  for (int i = 0; i < BOOP_N; ++i)
+    destination[i] = source[i];
+}
+
+static void initialize_step(BoopStep *step) {
+  zero_vector(step->normal);
+  zero_vector(step->tangent);
+  zero_vector(step->compound);
+  zero_vector(step->correction);
+  step->cg_iterations = 0;
+  step->cg_stop = BOOP_CG_ZERO_RADIUS;
+  step->cg_initial = 0.0;
+  step->cg_final = 0.0;
+  step->cg_curvature = NAN;
+  step->cg_rayleigh = NAN;
+}
 
 static double violation(const BoopModel *model) {
   double value = 0.0;
@@ -70,7 +92,7 @@ static double boundary_distance(const double *point, const double *direction,
 static void steihaug(const BoopWorkspace *work, const BoopModel *model,
                      const double *gradient, double radius, BoopStep *step) {
   double residual[BOOP_N], direction[BOOP_N], action[BOOP_N], trial[BOOP_N];
-  memset(step->tangent, 0, sizeof(step->tangent));
+  zero_vector(step->tangent);
   step->cg_iterations = 0;
   step->cg_curvature = NAN;
   step->cg_rayleigh = NAN;
@@ -100,7 +122,7 @@ static void steihaug(const BoopWorkspace *work, const BoopModel *model,
         action[row] += model->hessian[row * BOOP_N + col] * direction[col];
     }
     project(work, model, action, trial);
-    memcpy(action, trial, sizeof(action));
+    copy_vector(action, trial);
     double curvature = dot(BOOP_N, direction, action);
     double direction_sq = dot(BOOP_N, direction, direction);
     step->cg_iterations = iteration;
@@ -125,7 +147,7 @@ static void steihaug(const BoopWorkspace *work, const BoopModel *model,
       step->cg_final = sqrt(residual_sq);
       return;
     }
-    memcpy(step->tangent, trial, sizeof(step->tangent));
+    copy_vector(step->tangent, trial);
     for (int i = 0; i < BOOP_N; ++i)
       trial[i] = residual[i] - alpha * action[i];
     project(work, model, trial, action);
@@ -137,7 +159,7 @@ static void steihaug(const BoopWorkspace *work, const BoopModel *model,
     }
     for (int i = 0; i < BOOP_N; ++i)
       direction[i] = action[i] + (new_sq / residual_sq) * direction[i];
-    memcpy(residual, action, sizeof(residual));
+    copy_vector(residual, action);
     residual_sq = new_sq;
   }
   step->cg_stop = BOOP_CG_ITERATION_LIMIT;
@@ -180,7 +202,7 @@ static BoopStatus linearize(BoopWorkspace *work, const BoopModel *model) {
 static void normal_step(const BoopWorkspace *work, const BoopModel *model,
                         const double *x, double *normal) {
   double rhs[BOOP_STORAGE(BOOP_M)] = {0.0}, dual[BOOP_STORAGE(BOOP_M)] = {0.0};
-  memset(normal, 0, BOOP_N * sizeof(double));
+  zero_vector(normal);
   for (int i = 0; i < BOOP_N; ++i) {
     if (work->active[i] < 0)
       normal[i] = model->lower[i] - x[i];
@@ -241,7 +263,7 @@ static void correction_step(const BoopWorkspace *work, const BoopModel *model,
                             const BoopModel *bo, const double *bo_x,
                             double radius, double *correction) {
   double rhs[BOOP_STORAGE(BOOP_M)] = {0.0}, dual[BOOP_STORAGE(BOOP_M)] = {0.0};
-  memset(correction, 0, BOOP_N * sizeof(double));
+  zero_vector(correction);
   for (int i = 0; i < BOOP_N; ++i) {
     if (work->active[i] < 0)
       correction[i] = model->lower[i] - bo_x[i];
@@ -317,8 +339,9 @@ static void record(BoopDiagnostics *diag, int k, const BoopWorkspace *work,
   diag->objective[k] = model->objective;
   diag->violation[k] = violation(model);
   diag->trust_radius[k] = trust;
-  memcpy(diag->x[k], work->x, sizeof(work->x));
-  memcpy(diag->active_bounds[k], work->active, sizeof(work->active));
+  copy_vector(diag->x[k], work->x);
+  for (int i = 0; i < BOOP_N; ++i)
+    diag->active_bounds[k][i] = work->active[i];
   diag->normal_step_norm[k] = norm(BOOP_N, step->normal);
   diag->tangential_step_norm[k] = norm(BOOP_N, step->tangent);
   diag->correction_step_norm[k] = norm(BOOP_N, step->correction);
@@ -339,9 +362,10 @@ BoopStatus boop_solve(BoopWorkspace *work, const double *initial,
 #endif
   int filter_entries = 0;
   double trust = BOOP_INITIAL_TRUST_RADIUS;
-  memset(work, 0, sizeof(*work));
-  if (diag)
-    memset(diag, 0, sizeof(*diag));
+  for (int i = 0; i < BOOP_N; ++i) {
+    work->active[i] = 0;
+    work->fixed[i] = 0;
+  }
   BoopStatus status = boop_evaluate(initial, parameters, &current);
   if (status)
     return status;
@@ -360,8 +384,7 @@ BoopStatus boop_solve(BoopWorkspace *work, const double *initial,
   filter_accepts(work, &filter_entries, &current);
   for (int iteration = 0; iteration < BOOP_SQP_ITERATIONS; ++iteration) {
     BoopStep step;
-    memset(&step, 0, sizeof(step));
-    step.cg_curvature = step.cg_rayleigh = NAN;
+    initialize_step(&step);
     status = boop_evaluate(work->x, parameters, &current);
     if (status)
       return status;
@@ -440,10 +463,10 @@ BoopStatus boop_solve(BoopWorkspace *work, const double *initial,
       procedure = BOOP_BYRD_OMOJUKUN;
       chosen = &bo;
       chosen_x = bo_x;
-      memcpy(chosen_step, step.compound, sizeof(chosen_step));
+      copy_vector(chosen_step, step.compound);
     }
     if (accepted) {
-      memcpy(work->x, chosen_x, sizeof(work->x));
+      copy_vector(work->x, chosen_x);
       trust = BOOP_TRUST_EXPAND * norm(BOOP_N, chosen_step);
     } else {
       /* Drop speculative bounds that the rejected trial never reached. */
@@ -461,6 +484,6 @@ BoopStatus boop_solve(BoopWorkspace *work, const double *initial,
     trust = fmax(trust, DBL_EPSILON);
     record(diag, iteration, work, chosen, &step, procedure, accepted, trust);
   }
-  memcpy(solution, work->x, BOOP_N * sizeof(double));
+  copy_vector(solution, work->x);
   return BOOP_OK;
 }

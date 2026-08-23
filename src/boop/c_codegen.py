@@ -83,7 +83,7 @@ def _config_header(program: GeneratedProgram, options: SolverOptions) -> str:
 def _problem_source(program: GeneratedProgram) -> str:
     sections = (
         '#include "boop_runtime.h"',
-        "#include <math.h>\n#include <string.h>",
+        "#include <math.h>",
         emit_evaluator(program),
         emit_equality_linear_algebra(program),
     )

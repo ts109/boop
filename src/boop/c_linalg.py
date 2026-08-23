@@ -15,7 +15,7 @@ def _emit_gram_assembly(program: GeneratedProgram) -> str:
         "void boop_assemble_gram(const BoopModel *model, const unsigned char *free_variables, double *gram) {",
         "  (void)model;",
         "  (void)free_variables;",
-        "  memset(gram, 0, BOOP_STORAGE(BOOP_M * BOOP_M) * sizeof(double));",
+        "  for (int i = 0; i < BOOP_STORAGE(BOOP_M * BOOP_M); ++i) gram[i] = 0.0;",
     ]
     for row, column, variables in program.equality_sparsity.gram_contributions:
         terms = (
@@ -34,7 +34,7 @@ def _emit_ldl(program: GeneratedProgram) -> str:
     factor = program.equality_sparsity.ldl
     lines = [
         "BoopStatus boop_ldl_factor(const double *gram, double *lower, double *diagonal) {",
-        "  memset(lower, 0, BOOP_STORAGE(BOOP_M * BOOP_M) * sizeof(double));",
+        "  for (int i = 0; i < BOOP_STORAGE(BOOP_M * BOOP_M); ++i) lower[i] = 0.0;",
         "  (void)gram;",
         "  (void)diagonal;",
     ]

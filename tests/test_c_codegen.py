@@ -13,7 +13,9 @@ def test_generated_c_builds_as_a_standalone_solver(tmp_path: Path) -> None:
     """Compile and execute the public allocation-free C API."""
     x, y = sympy.symbols("x y")
     nlp = NonlinearProgram(x=(x, y), f=(x - 1) ** 2 + (y + 2) ** 2)
-    generate_c_solver(nlp).write(tmp_path)
+    generated = generate_c_solver(nlp)
+    assert "string.h" not in "".join(generated.sources.values())
+    generated.write(tmp_path)
     harness = tmp_path / "main.c"
     harness.write_text(
         """#include <math.h>
