@@ -112,3 +112,49 @@ NumPy C API, and solutions are returned as plain `list[float]` values. When
 diagnostics are requested, it returns an extension-backed object whose
 individual histories are converted to Python lists only when their properties
 are accessed.
+
+Lookup tables are declared alongside scalar parameters. Their shapes are fixed
+when generating the solver; coordinates and samples are supplied at runtime:
+
+```python
+from boop import LUT
+
+curve = LUT(shape=(4,))
+surface = LUT(shape=(3, 2))
+nlp = NonlinearProgram(
+    x=(x, y),
+    f=(curve(x) - 1)**2 + (surface(x, y) - 2)**2,
+    luts=(curve, surface),
+)
+solver = create_compiled_solver(nlp)
+solution = solver(
+    [0.8, 0.4],
+    luts=[
+        (([0, 0.5, 1, 2],), [0, 0.2, 1, 3]),
+        (([0, 1, 2], [0, 2]), [[0, 2], [1, 3], [4, 6]]),
+    ],
+)
+```
+
+Each runtime slot is `(nodes, values)` in `nlp.luts` declaration order. Nodes
+must be finite and strictly increasing, with at least two nodes per axis.
+Samples must be finite and match the declared shape. In 2D, `values[i][j]`
+belongs to the first axis's node `i` and the second axis's node `j`.
+
+Boop uses natural cubic splines in 1D and their C² tensor product in 2D.
+Outside the grid, it extends the boundary polynomial. Spline construction is
+linear in the number of samples and happens inside every solve, before the SQP
+iterations. Axis factorizations are reused within construction. The solver
+stores values and first derivatives at nodes (including mixed derivatives in
+2D), then evaluates local Hermite polynomials with analytic gradients and
+Hessians. No user derivative implementation is required.
+
+The generated C API accepts `const BoopLutInput *luts` between the scalar
+parameters and solution arguments of `boop_solve`. Each declaration-order input
+contains `nodes[2]` and `values` pointers; 1D inputs leave `nodes[1]` null. A 2D
+sample array is contiguous in row-major order, `values[i * ny + j]`. The
+`BOOP_LUT_COUNT` and `BOOP_LUT_SHAPES` configuration macros describe the required
+inputs. Pass `NULL` when no LUTs are declared. All spline fields and scratch
+storage are statically sized in the caller-owned workspace. Preparation has a
+bounded workload fixed by the declared shapes, and each query uses binary
+search followed by fixed-size polynomial arithmetic.

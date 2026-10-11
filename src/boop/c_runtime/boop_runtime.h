@@ -11,7 +11,8 @@ typedef enum {
   BOOP_OK = 0,
   BOOP_NONFINITE_EVALUATION = 1,
   BOOP_FACTOR_FAILURE = 2,
-  BOOP_INVALID_ACTIVE_SET = 3
+  BOOP_INVALID_ACTIVE_SET = 3,
+  BOOP_INVALID_LUT = 4
 } BoopStatus;
 
 typedef enum {
@@ -29,6 +30,13 @@ typedef enum {
   BOOP_CG_CONVERGED = 4,
   BOOP_CG_ITERATION_LIMIT = 5
 } BoopCGStop;
+
+/* Declaration-order inputs. 2D values use values[i * ny + j].
+   Node arrays must be finite and strictly increasing; inputs live through solve. */
+typedef struct {
+  const double *nodes[2];
+  const double *values;
+} BoopLutInput;
 
 typedef struct {
   double objective;
@@ -60,6 +68,9 @@ typedef struct {
 } BoopDiagnostics;
 
 typedef struct {
+  double lut_fields[BOOP_STORAGE(BOOP_LUT_FIELDS)];
+  double lut_scratch[2 * BOOP_LUT_MAX_AXIS];
+  const double *lut_nodes[BOOP_STORAGE(BOOP_LUT_COUNT)][2];
   double x[BOOP_N];
   signed char active[BOOP_N];
   unsigned char fixed[BOOP_N];
@@ -72,7 +83,7 @@ typedef struct {
 } BoopWorkspace;
 
 BoopStatus boop_evaluate(const double *x, const double *parameters,
-                         BoopModel *model);
+                         const BoopWorkspace *workspace, BoopModel *model);
 void boop_assemble_gram(const BoopModel *model,
                         const unsigned char *free_variables, double *gram);
 BoopStatus boop_ldl_factor(const double *gram, double *lower, double *diagonal);
@@ -80,7 +91,7 @@ void boop_ldl_solve(const double *lower, const double *diagonal,
                     const double *rhs, double *solution);
 
 BoopStatus boop_solve(BoopWorkspace *workspace, const double *initial_guess,
-                      const double *parameters, double *solution,
+                      const double *parameters, const BoopLutInput *luts, double *solution,
                       BoopDiagnostics *diagnostics);
 
 #endif

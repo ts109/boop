@@ -104,7 +104,7 @@ class NativeSolverDiagnostics(Protocol):
 
 
 class _NativeSolver(Protocol):
-    def __call__(self, initial_guess: Sequence[float], parameters: Sequence[float], diagnostics: bool = False) -> Any: ...
+    def __call__(self, initial_guess: Sequence[float], parameters: Sequence[float], diagnostics: bool = False, luts: Sequence[Any] = ()) -> Any: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -130,14 +130,19 @@ class CompiledSolver:
         self._native = native
 
     @overload
-    def __call__(self, initial_guess: Sequence[float], parameters: Sequence[float] = (), *, diagnostics: Literal[False] = False) -> list[float]: ...
+    def __call__(self, initial_guess: Sequence[float], parameters: Sequence[float] = (), *, luts: Sequence[Any] = (), diagnostics: Literal[False] = False) -> list[float]: ...
 
     @overload
-    def __call__(self, initial_guess: Sequence[float], parameters: Sequence[float] = (), *, diagnostics: Literal[True]) -> CompiledSolverResult: ...
+    def __call__(self, initial_guess: Sequence[float], parameters: Sequence[float] = (), *, luts: Sequence[Any] = (), diagnostics: Literal[True]) -> CompiledSolverResult: ...
 
-    def __call__(self, initial_guess: Sequence[float], parameters: Sequence[float] = (), *, diagnostics: bool = False) -> list[float] | CompiledSolverResult:
-        """Run the native solver using ordinary Python sequence inputs."""
-        raw = self._native(initial_guess, parameters, diagnostics)
+    def __call__(self, initial_guess: Sequence[float], parameters: Sequence[float] = (), *, luts: Sequence[Any] = (), diagnostics: bool = False) -> list[float] | CompiledSolverResult:
+        """Run the native solver using ordinary Python sequence inputs.
+
+        Each entry in ``luts`` is ``(nodes, values)``. ``nodes`` contains one
+        sequence per axis; 2D ``values`` contains rows indexed by the first
+        axis. Shapes and slot ordering come from the generated C interface.
+        """
+        raw = self._native(initial_guess, parameters, diagnostics, luts)
         if not diagnostics:
             return cast(list[float], raw)
         solution, native_diagnostics = raw

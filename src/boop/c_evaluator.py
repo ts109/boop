@@ -1,7 +1,9 @@
 """Emit the problem-specific C evaluator from symbolic expressions."""
 
 import sympy
+from sympy.printing.c import C99CodePrinter
 
+from .lut import LUTCall
 from .program import GeneratedProgram
 
 
@@ -11,11 +13,12 @@ def emit_evaluator(program: GeneratedProgram) -> str:
     variables = sympy.symbols(f"boop_x_0:{nlp.dimension}")
     parameters = sympy.symbols(f"boop_parameter_0:{len(nlp.parameters)}")
     substitutions = dict(zip((*nlp.x, *nlp.parameters), (*variables, *parameters), strict=True))
+    substitutions.update((table.identity, sympy.Integer(index)) for index, table in enumerate(nlp.luts))
     expressions = [expression.xreplace(substitutions) for expression in _flatten_evaluator(program)]
     replacements, reduced = sympy.cse(expressions, symbols=sympy.numbered_symbols("temporary_"))
 
-    lines = ["BoopStatus boop_evaluate(const double *x, const double *parameters, BoopModel *model) {"]
-    lines.extend(("  (void)x;", "  (void)parameters;"))
+    lines = ["BoopStatus boop_evaluate(const double *x, const double *parameters, const BoopWorkspace *workspace, BoopModel *model) {"]
+    lines.extend(("  (void)x;", "  (void)parameters;", "  (void)workspace;"))
     lines.extend(f"  const double {symbol} = x[{index}];" for index, symbol in enumerate(variables))
     lines.extend(f"  const double {symbol} = parameters[{index}];" for index, symbol in enumerate(parameters))
     lines.extend(f"  const double {symbol} = {_ccode(expression)};" for symbol, expression in replacements)
@@ -61,5 +64,16 @@ def _finite_checks() -> tuple[str, ...]:
     )
 
 
+class _Printer(C99CodePrinter):
+    def _print_LUTCall(self, expression: LUTCall) -> str:  # noqa: N802
+        identity, dx, dy, *queries = expression.args
+        orders = (dx, dy)
+        if any(order > 2 for order in orders) or sum(orders) > 2:
+            message = "LUT derivatives above total order two are unsupported"
+            raise ValueError(message)
+        x, y = (*queries, sympy.Integer(0))[:2]
+        return f"boop_lut_eval(workspace, {identity}, {dx}, {dy}, {self._print(x)}, {self._print(y)})"
+
+
 def _ccode(expression: sympy.Expr) -> str:
-    return str(sympy.ccode(expression, standard="c99"))
+    return _Printer().doprint(expression)

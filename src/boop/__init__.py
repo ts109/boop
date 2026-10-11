@@ -3,12 +3,14 @@
 from .c_codegen import GeneratedCCode, generate_c_solver
 from .ir import EvaluatorIR, build_evaluator_ir
 from .jit import CompiledSolver, CompiledSolverResult, NativeSolverDiagnostics, create_compiled_solver
+from .lut import LUT
 from .model import NonlinearProgram
 from .options import SolverOptions
 from .program import GeneratedProgram, generate_program
 from .sparsity import EqualitySparsityIR, SparseLDLProgram, analyze_equality_sparsity
 
 __all__ = [
+    "LUT",
     "CompiledSolver",
     "CompiledSolverResult",
     "EqualitySparsityIR",

@@ -25,7 +25,7 @@ int main(void) {
   double initial[BOOP_N] = {4.0, -5.0};
   double parameters[BOOP_STORAGE(BOOP_P)] = {0.0};
   double solution[BOOP_N];
-  if (boop_solve(&workspace, initial, parameters, solution, NULL) != BOOP_OK) return 1;
+  if (boop_solve(&workspace, initial, parameters, NULL, solution, NULL) != BOOP_OK) return 1;
   return fabs(solution[0] - 1.0) < 1e-9 && fabs(solution[1] + 2.0) < 1e-9 ? 0 : 2;
 }
 """

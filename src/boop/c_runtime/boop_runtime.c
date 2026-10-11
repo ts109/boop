@@ -1,5 +1,9 @@
 #include "boop_runtime.h"
 
+#if BOOP_LUT_COUNT
+BoopStatus boop_prepare_luts(BoopWorkspace *workspace, const BoopLutInput *luts);
+#endif
+
 #include <float.h>
 #include <math.h>
 #include <stdbool.h>
@@ -354,8 +358,14 @@ static void record(BoopDiagnostics *diag, int k, const BoopWorkspace *work,
 }
 
 BoopStatus boop_solve(BoopWorkspace *work, const double *initial,
-                      const double *parameters, double *solution,
+                      const double *parameters, const BoopLutInput *luts, double *solution,
                       BoopDiagnostics *diag) {
+#if BOOP_LUT_COUNT
+  BoopStatus preparation = boop_prepare_luts(work, luts);
+  if (preparation) return preparation;
+#else
+  (void)luts;
+#endif
   BoopModel current, bo;
 #if BOOP_NONLINEAR_EQUALITIES
   BoopModel soc;
@@ -366,7 +376,7 @@ BoopStatus boop_solve(BoopWorkspace *work, const double *initial,
     work->active[i] = 0;
     work->fixed[i] = 0;
   }
-  BoopStatus status = boop_evaluate(initial, parameters, &current);
+  BoopStatus status = boop_evaluate(initial, parameters, work, &current);
   if (status)
     return status;
   for (int i = 0; i < BOOP_N; ++i) {
@@ -377,7 +387,7 @@ BoopStatus boop_solve(BoopWorkspace *work, const double *initial,
     if (work->fixed[i])
       work->active[i] = -1;
   }
-  status = boop_evaluate(work->x, parameters, &current);
+  status = boop_evaluate(work->x, parameters, work, &current);
   if (status)
     return status;
   /* The projected initial point is the first filter entry. */
@@ -385,7 +395,7 @@ BoopStatus boop_solve(BoopWorkspace *work, const double *initial,
   for (int iteration = 0; iteration < BOOP_SQP_ITERATIONS; ++iteration) {
     BoopStep step;
     initialize_step(&step);
-    status = boop_evaluate(work->x, parameters, &current);
+    status = boop_evaluate(work->x, parameters, work, &current);
     if (status)
       return status;
     status = linearize(work, &current);
@@ -431,7 +441,7 @@ BoopStatus boop_solve(BoopWorkspace *work, const double *initial,
 #endif
     for (int i = 0; i < BOOP_N; ++i)
       bo_x[i] = work->x[i] + step.compound[i];
-    status = boop_evaluate(bo_x, parameters, &bo);
+    status = boop_evaluate(bo_x, parameters, work, &bo);
     if (status)
       return status;
     bool accepted = false;
@@ -443,7 +453,7 @@ BoopStatus boop_solve(BoopWorkspace *work, const double *initial,
     correction_step(work, &current, &bo, bo_x, trust, step.correction);
     for (int i = 0; i < BOOP_N; ++i)
       soc_x[i] = bo_x[i] + step.correction[i];
-    status = boop_evaluate(soc_x, parameters, &soc);
+    status = boop_evaluate(soc_x, parameters, work, &soc);
     if (status)
       return status;
     for (int i = 0; i < BOOP_N; ++i)

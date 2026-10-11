@@ -11,6 +11,8 @@ typedef struct {
 
 typedef struct {
   PyObject_HEAD BoopWorkspace workspace;
+  BoopLutInput lut_inputs[BOOP_STORAGE(BOOP_LUT_COUNT)];
+  double lut_storage[BOOP_STORAGE(BOOP_LUT_INPUT_SIZE)];
 } PyBoopSolver;
 
 static PyObject *double_list(const double *values, Py_ssize_t length) {
@@ -194,16 +196,89 @@ static int read_vector(PyObject *object, Py_ssize_t expected,
   return 0;
 }
 
+/* Each slot is (axis-node sequences, sample values), in declaration order. */
+static int read_luts(PyObject *object, BoopLutInput *inputs, double *storage) {
+  static const int shapes[BOOP_STORAGE(BOOP_LUT_COUNT)][2] = BOOP_LUT_SHAPES;
+  if (!object) {
+    if (BOOP_LUT_COUNT) {
+      PyErr_SetString(PyExc_ValueError, "LUT inputs are required");
+      return -1;
+    }
+    return 0;
+  }
+  PyObject *tables = PySequence_Fast(object, "luts must be a sequence");
+  if (!tables) return -1;
+  if (PySequence_Fast_GET_SIZE(tables) != BOOP_LUT_COUNT) {
+    PyErr_Format(PyExc_ValueError, "luts must contain %d tables", BOOP_LUT_COUNT);
+    Py_DECREF(tables);
+    return -1;
+  }
+  for (int k = 0; k < BOOP_LUT_COUNT; ++k) {
+    PyObject *table = PySequence_Fast(PySequence_Fast_GET_ITEM(tables, k),
+                                      "LUT input must be (nodes, values)");
+    PyObject *axes = NULL, *rows = NULL;
+    if (!table) goto failure;
+    if (PySequence_Fast_GET_SIZE(table) != 2) {
+      PyErr_SetString(PyExc_ValueError, "LUT input must be (nodes, values)");
+      goto table_failure;
+    }
+    int nx = shapes[k][0], ny = shapes[k][1], dimensions = ny > 1 ? 2 : 1;
+    axes = PySequence_Fast(PySequence_Fast_GET_ITEM(table, 0), "nodes must be a sequence of axes");
+    if (!axes) goto table_failure;
+    if (PySequence_Fast_GET_SIZE(axes) != dimensions) {
+      PyErr_SetString(PyExc_ValueError, "incorrect LUT axis count");
+      goto table_failure;
+    }
+    inputs[k].nodes[1] = NULL;
+    for (int axis = 0; axis < dimensions; ++axis) {
+      int n = shapes[k][axis];
+      inputs[k].nodes[axis] = storage;
+      if (read_vector(PySequence_Fast_GET_ITEM(axes, axis), n, storage, "LUT nodes") < 0)
+        goto table_failure;
+      storage += n;
+    }
+    inputs[k].values = storage;
+    PyObject *values = PySequence_Fast_GET_ITEM(table, 1);
+    if (dimensions == 1) {
+      if (read_vector(values, nx, storage, "LUT values") < 0) goto table_failure;
+    } else {
+      rows = PySequence_Fast(values, "LUT values must be a sequence of rows");
+      if (!rows) goto table_failure;
+      if (PySequence_Fast_GET_SIZE(rows) != nx) {
+        PyErr_SetString(PyExc_ValueError, "incorrect LUT row count");
+        goto table_failure;
+      }
+      for (int i = 0; i < nx; ++i)
+        if (read_vector(PySequence_Fast_GET_ITEM(rows, i), ny, storage + i * ny,
+                         "LUT row") < 0) goto table_failure;
+    }
+    storage += nx * ny;
+    Py_XDECREF(rows);
+    Py_DECREF(axes);
+    Py_DECREF(table);
+    continue;
+  table_failure:
+    Py_XDECREF(rows);
+    Py_XDECREF(axes);
+    Py_DECREF(table);
+  failure:
+    Py_DECREF(tables);
+    return -1;
+  }
+  Py_DECREF(tables);
+  return 0;
+}
+
 static PyObject *solver_call(PyBoopSolver *self, PyObject *args,
                              PyObject *kwargs) {
-  static char *keywords[] = {"initial_guess", "parameters", "diagnostics",
+  static char *keywords[] = {"initial_guess", "parameters", "diagnostics", "luts",
                              NULL};
   PyObject *initial_object;
-  PyObject *parameter_object = NULL;
+  PyObject *parameter_object = NULL, *lut_object = NULL;
   int diagnostics_requested = 0;
-  if (!PyArg_ParseTupleAndKeywords(args, kwargs, "O|Op:__call__", keywords,
+  if (!PyArg_ParseTupleAndKeywords(args, kwargs, "O|OpO:__call__", keywords,
                                    &initial_object, &parameter_object,
-                                   &diagnostics_requested))
+                                   &diagnostics_requested, &lut_object))
     return NULL;
   double initial[BOOP_N], parameters[BOOP_STORAGE(BOOP_P)] = {0.0},
                           solution[BOOP_N];
@@ -216,6 +291,7 @@ static PyObject *solver_call(PyBoopSolver *self, PyObject *args,
     PyErr_Format(PyExc_ValueError, "parameters must contain %d values", BOOP_P);
     return NULL;
   }
+  if (read_luts(lut_object, self->lut_inputs, self->lut_storage) < 0) return NULL;
   PyBoopDiagnostics *native = NULL;
   if (diagnostics_requested) {
     native = PyObject_New(PyBoopDiagnostics, &PyBoopDiagnosticsType);
@@ -224,7 +300,7 @@ static PyObject *solver_call(PyBoopSolver *self, PyObject *args,
   }
   BoopStatus status;
   Py_BEGIN_ALLOW_THREADS status =
-      boop_solve(&self->workspace, initial, parameters, solution,
+      boop_solve(&self->workspace, initial, parameters, self->lut_inputs, solution,
                  native ? &native->diagnostics : NULL);
   Py_END_ALLOW_THREADS if (status != BOOP_OK) {
     Py_XDECREF(native);

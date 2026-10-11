@@ -5,6 +5,8 @@ from numbers import Number
 
 import sympy
 
+from .lut import LUT, LUTCall
+
 
 @dataclass(frozen=True, slots=True)
 class NonlinearProgram:
@@ -24,6 +26,8 @@ class NonlinearProgram:
         Upper bounds for ``x``. If omitted, all variables are unbounded above.
     parameters
         Symbols whose numerical values are supplied when the solver is called.
+    luts
+        Fixed-shape lookup tables, in runtime input order.
     """
 
     x: tuple[sympy.Symbol, ...]
@@ -32,6 +36,8 @@ class NonlinearProgram:
     lb: tuple[sympy.Expr | Number, ...] | None = None
     ub: tuple[sympy.Expr | Number, ...] | None = None
     parameters: tuple[sympy.Symbol, ...] = field(default_factory=tuple)
+
+    luts: tuple[LUT, ...] = field(default_factory=tuple)
 
     def __post_init__(self) -> None:
         # Normalize absent and numeric bounds before validating the signature.
@@ -60,9 +66,19 @@ class NonlinearProgram:
             raise ValueError(message)
 
         # Generated evaluators have no implicit inputs.
-        allowed = {*self.x, *self.parameters}
+        if len(set(self.luts)) != len(self.luts):
+            message = "LUT declarations must be unique"
+            raise ValueError(message)
+        identities = {table.identity for table in self.luts}
+        allowed = {*self.x, *self.parameters, *identities}
         expressions = (self.f, *self.g, *lower_bounds, *upper_bounds)
         unknown = set().union(*(expr.free_symbols for expr in expressions)) - allowed
+
+        for expr in expressions:
+            for call in expr.atoms(LUTCall):
+                if call.args[0] not in identities:
+                    message = "expressions contain an undeclared LUT"
+                    raise ValueError(message)
 
         if unknown:
             message = f"expressions contain undeclared symbols: {sorted(map(str, unknown))}"

@@ -1,5 +1,6 @@
 """C source generation for problem-specific Boop solvers."""
 
+import math
 from dataclasses import dataclass
 from importlib import resources
 from pathlib import Path
@@ -62,6 +63,11 @@ def _config_header(program: GeneratedProgram, options: SolverOptions) -> str:
 #define BOOP_N {program.nlp.dimension}
 #define BOOP_M {program.nlp.equality_dimension}
 #define BOOP_P {len(program.nlp.parameters)}
+#define BOOP_LUT_COUNT {len(program.nlp.luts)}
+#define BOOP_LUT_SHAPES {{{', '.join('{' + ', '.join(map(str, (*lut.shape, 1)[:2])) + '}' for lut in program.nlp.luts) or '{0, 0}'}}}
+#define BOOP_LUT_INPUT_SIZE {sum(sum(lut.shape) + math.prod(lut.shape) for lut in program.nlp.luts)}
+#define BOOP_LUT_FIELDS {sum((2 if len(lut.shape) == 1 else 4) * math.prod(lut.shape) for lut in program.nlp.luts)}
+#define BOOP_LUT_MAX_AXIS {max((n for lut in program.nlp.luts for n in lut.shape), default=1)}
 #define BOOP_SQP_ITERATIONS {options.sqp_iterations}
 #define BOOP_CG_ITERATIONS {options.cg_iterations}
 #define BOOP_NONLINEAR_EQUALITIES {nonlinear}
@@ -84,7 +90,21 @@ def _problem_source(program: GeneratedProgram) -> str:
     sections = (
         '#include "boop_runtime.h"',
         "#include <math.h>",
+        _lut_source(program),
         emit_evaluator(program),
         emit_equality_linear_algebra(program),
     )
     return "\n\n".join(sections) + "\n"
+
+
+def _lut_source(program: GeneratedProgram) -> str:
+    if not program.nlp.luts:
+        return ""
+    offsets = []
+    offset = 0
+    for lut in program.nlp.luts:
+        offsets.append(str(offset))
+        offset += (2 if len(lut.shape) == 1 else 4) * math.prod(lut.shape)
+    runtime = resources.files("boop").joinpath("c_runtime", "boop_lut.c").read_text()
+    return ("static const int boop_lut_shapes[BOOP_LUT_COUNT][2] = BOOP_LUT_SHAPES;\n"
+            f"static const int boop_lut_offsets[BOOP_LUT_COUNT] = {{{', '.join(offsets)}}};\n" + runtime)
