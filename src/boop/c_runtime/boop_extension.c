@@ -304,8 +304,24 @@ static PyObject *solver_call(PyBoopSolver *self, PyObject *args,
                  native ? &native->diagnostics : NULL);
   Py_END_ALLOW_THREADS if (status != BOOP_OK) {
     Py_XDECREF(native);
-    PyErr_Format(PyExc_RuntimeError, "native Boop solver failed with status %d",
-                 status);
+    if (status == BOOP_INVALID_ACTIVE_SET) {
+      int active[BOOP_N];
+      for (int i = 0; i < BOOP_N; ++i)
+        active[i] = self->workspace.active[i];
+      PyObject *error = PyObject_CallFunction(PyExc_RuntimeError, "s",
+          "native Boop solver failed with status 3 (invalid active set)");
+      PyObject *state = Py_BuildValue("{s:i,s:i,s:N,s:N}",
+          "status", status, "equalities", BOOP_M,
+          "x", double_list(self->workspace.x, BOOP_N),
+          "active_bounds", int_list(active, BOOP_N));
+      if (error && state && PyObject_SetAttrString(error, "solver_state", state) == 0)
+        PyErr_SetObject(PyExc_RuntimeError, error);
+      Py_XDECREF(state);
+      Py_XDECREF(error);
+    } else {
+      PyErr_Format(PyExc_RuntimeError, "native Boop solver failed with status %d",
+                   status);
+    }
     return NULL;
   }
   PyObject *solution_object = double_list(solution, BOOP_N);

@@ -158,3 +158,27 @@ inputs. Pass `NULL` when no LUTs are declared. All spline fields and scratch
 storage are statically sized in the caller-owned workspace. Preparation has a
 bounded workload fixed by the declared shapes, and each query uses binary
 search followed by fixed-size polynomial arithmetic.
+
+An active working set can contain at most `n - m` variable bounds alongside `m`
+equalities. Simultaneous blocking bounds are admitted within that capacity;
+when it is full, the proposed trial is shortened at the first blocking bound.
+These operations stay inside the configured SQP iteration budget. They do not
+relax box bounds or imply that the equalities of an infeasible problem were solved.
+
+An invalid initial/fixed working set still raises `RuntimeError` with status 3.
+The exception's `solver_state` dictionary exposes `status`, `equalities`, `x` and
+`active_bounds` for investigation. Other native errors retain their status code.
+
+Bound-count capacity alone is insufficient: added bound normals must also be
+independent of the equalities and current working bounds. Boop checks this by
+projecting and orthogonalizing candidate normals with the existing factorization;
+no additional factorization/retry loop is introduced.
+`active_set_independence_tolerance` controls the squared projected norm threshold.
+Objective multiplier releases require a reached, stationary, equality-feasible
+face, controlled by `active_set_feasibility_tolerance`. Above
+`restoration_tolerance`, iterations on active working faces use the normal
+step to repair feasibility. If that repair exceeds the trust radius, its
+multipliers can release obstructing reached bounds. A repair that fits keeps
+its working face, avoiding release/reactivation cycles. These iterations
+share the same SQP budget. Second-order corrections are shortened at box
+boundaries before evaluation instead of being discarded for crossing them.

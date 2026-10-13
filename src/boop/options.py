@@ -38,6 +38,16 @@ class SolverOptions:
     active_set_stationarity_tolerance
         Relative face-stationarity tolerance required before an active bound
         may be released based on its multiplier.
+    restoration_tolerance
+        Equality residual above which iterations on an active working face
+        repair feasibility without an objective-driven tangential step.
+    active_set_feasibility_tolerance
+        Equality residual limit before objective multipliers may release a
+        bound; all working bounds must also have been reached. Restoration
+        instead uses normal-step multipliers at reached bounds.
+    active_set_independence_tolerance
+        Minimum squared norm of a new bound normal projected into the current
+        tangent space, after excluding simultaneously added bounds.
     """
 
     sqp_iterations: int = 10
@@ -53,6 +63,9 @@ class SolverOptions:
     filter_gamma: float = 1e-5
     bound_tolerance: float = 1e-10
     active_set_stationarity_tolerance: float = 1e-8
+    restoration_tolerance: float = 1e-3
+    active_set_feasibility_tolerance: float = 1e-6
+    active_set_independence_tolerance: float = 1e-8
 
     def __post_init__(self) -> None:
         if self.sqp_iterations <= 0 or self.cg_iterations <= 0:
@@ -81,6 +94,9 @@ class SolverOptions:
                 self.filter_gamma,
                 self.bound_tolerance,
                 self.active_set_stationarity_tolerance,
+                self.restoration_tolerance,
+                self.active_set_feasibility_tolerance,
+                self.active_set_independence_tolerance,
             )
             < 0.0
         ):

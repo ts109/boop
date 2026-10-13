@@ -82,6 +82,9 @@ def _config_header(program: GeneratedProgram, options: SolverOptions) -> str:
 #define BOOP_FILTER_GAMMA {options.filter_gamma:.17g}
 #define BOOP_BOUND_TOLERANCE {options.bound_tolerance:.17g}
 #define BOOP_ACTIVE_SET_STATIONARITY_TOLERANCE {options.active_set_stationarity_tolerance:.17g}
+#define BOOP_RESTORATION_TOLERANCE {options.restoration_tolerance:.17g}
+#define BOOP_ACTIVE_SET_FEASIBILITY_TOLERANCE {options.active_set_feasibility_tolerance:.17g}
+#define BOOP_ACTIVE_SET_INDEPENDENCE_TOLERANCE {options.active_set_independence_tolerance:.17g}
 #endif
 """
 

@@ -204,7 +204,7 @@ static BoopStatus linearize(BoopWorkspace *work, const BoopModel *model) {
 }
 
 static void normal_step(const BoopWorkspace *work, const BoopModel *model,
-                        const double *x, double *normal) {
+                        const double *x, double *normal, double *multipliers) {
   double rhs[BOOP_STORAGE(BOOP_M)] = {0.0}, dual[BOOP_STORAGE(BOOP_M)] = {0.0};
   zero_vector(normal);
   for (int i = 0; i < BOOP_N; ++i) {
@@ -225,35 +225,65 @@ static void normal_step(const BoopWorkspace *work, const BoopModel *model,
     if (work->free_variables[col])
       for (int row = 0; row < BOOP_M; ++row)
         normal[col] += model->jacobian[row * BOOP_N + col] * dual[row];
+  for (int col = 0; col < BOOP_N; ++col) {
+    double stationarity = normal[col];
+    for (int row = 0; row < BOOP_M; ++row)
+      stationarity -= model->jacobian[row * BOOP_N + col] * dual[row];
+    multipliers[col] = work->active[col] < 0 ? stationarity : -stationarity;
+  }
 }
 
-static int removable_bound(const BoopWorkspace *work, const BoopModel *model) {
+static bool restoring_working_face(const BoopWorkspace *work, const BoopModel *model) {
+  if (violation(model) <= BOOP_RESTORATION_TOLERANCE)
+    return false;
+  for (int i = 0; i < BOOP_N; ++i)
+    if (work->active[i])
+      return true;
+  return false;
+}
+
+static int removable_bound(const BoopWorkspace *work, const BoopModel *model,
+                           const double *restoration_multipliers, bool repair_fits) {
+  bool restoring = restoring_working_face(work, model);
+  if (restoring && repair_fits)
+    return -1;
   double projected[BOOP_N], rhs[BOOP_STORAGE(BOOP_M)] = {0.0},
                             equality[BOOP_STORAGE(BOOP_M)] = {0.0};
-  project(work, model, model->gradient, projected);
-  if (norm(BOOP_N, projected) > BOOP_ACTIVE_SET_STATIONARITY_TOLERANCE *
-                                    fmax(1.0, norm(BOOP_N, model->gradient)))
-    return -1;
-  for (int row = 0; row < BOOP_M; ++row)
-    for (int col = 0; col < BOOP_N; ++col)
-      if (work->free_variables[col])
-        rhs[row] -= model->jacobian[row * BOOP_N + col] * model->gradient[col];
-  if (BOOP_M > 0)
-    boop_ldl_solve(work->ldl_lower, work->ldl_diagonal, rhs, equality);
+  if (!restoring) {
+    if (violation(model) > BOOP_ACTIVE_SET_FEASIBILITY_TOLERANCE)
+      return -1;
+    /* Objective multipliers require a reached, stationary feasible face. */
+    for (int i = 0; i < BOOP_N; ++i)
+      if (work->active[i]) {
+        double bound = work->active[i] < 0 ? model->lower[i] : model->upper[i];
+        if (fabs(work->x[i] - bound) > BOOP_BOUND_TOLERANCE)
+          return -1;
+      }
+    project(work, model, model->gradient, projected);
+    if (norm(BOOP_N, projected) > BOOP_ACTIVE_SET_STATIONARITY_TOLERANCE *
+                                      fmax(1.0, norm(BOOP_N, model->gradient)))
+      return -1;
+    for (int row = 0; row < BOOP_M; ++row)
+      for (int col = 0; col < BOOP_N; ++col)
+        if (work->free_variables[col])
+          rhs[row] -= model->jacobian[row * BOOP_N + col] * model->gradient[col];
+    if (BOOP_M > 0)
+      boop_ldl_solve(work->ldl_lower, work->ldl_diagonal, rhs, equality);
+  }
   int worst = -1;
-  double worst_multiplier = -BOOP_BOUND_TOLERANCE;
+  double worst_multiplier = -BOOP_ACTIVE_SET_STATIONARITY_TOLERANCE;
   for (int col = 0; col < BOOP_N; ++col)
     if (work->active[col] && !work->fixed[col]) {
-      bool reached =
-          work->active[col] < 0
-              ? fabs(work->x[col] - model->lower[col]) <= BOOP_BOUND_TOLERANCE
-              : fabs(work->x[col] - model->upper[col]) <= BOOP_BOUND_TOLERANCE;
-      if (!reached)
+      double bound = work->active[col] < 0 ? model->lower[col] : model->upper[col];
+      if (fabs(work->x[col] - bound) > BOOP_BOUND_TOLERANCE)
         continue;
-      double stationarity = model->gradient[col];
-      for (int row = 0; row < BOOP_M; ++row)
-        stationarity += model->jacobian[row * BOOP_N + col] * equality[row];
-      double multiplier = work->active[col] < 0 ? stationarity : -stationarity;
+      double multiplier = restoration_multipliers[col];
+      if (!restoring) {
+        double stationarity = model->gradient[col];
+        for (int row = 0; row < BOOP_M; ++row)
+          stationarity += model->jacobian[row * BOOP_N + col] * equality[row];
+        multiplier = work->active[col] < 0 ? stationarity : -stationarity;
+      }
       if (multiplier < worst_multiplier) {
         worst_multiplier = multiplier;
         worst = col;
@@ -292,6 +322,18 @@ static void correction_step(const BoopWorkspace *work, const BoopModel *model,
       correction[i] *= radius / length;
 }
 
+static double box_step_fraction(const double *x, const double *step,
+                                const BoopModel *model) {
+  double fraction = 1.0;
+  for (int i = 0; i < BOOP_N; ++i) {
+    if (step[i] > BOOP_BOUND_TOLERANCE && isfinite(model->upper[i]))
+      fraction = fmin(fraction, (model->upper[i] - x[i]) / step[i]);
+    if (step[i] < -BOOP_BOUND_TOLERANCE && isfinite(model->lower[i]))
+      fraction = fmin(fraction, (model->lower[i] - x[i]) / step[i]);
+  }
+  return fmax(0.0, fraction);
+}
+
 static bool box_feasible(const double *x, const BoopModel *model) {
   for (int i = 0; i < BOOP_N; ++i)
     if (x[i] < model->lower[i] - BOOP_BOUND_TOLERANCE ||
@@ -302,10 +344,15 @@ static bool box_feasible(const double *x, const BoopModel *model) {
 #endif
 
 static int blocking_bound(const double *x, const double *step,
-                          const BoopModel *model, signed char *active) {
+                          const BoopModel *model, BoopWorkspace *work,
+                          double *fraction_limit) {
+  signed char *active = work->active;
   double first = INFINITY;
+  int remaining = BOOP_N - BOOP_M;
   for (int i = 0; i < BOOP_N; ++i)
-    if (!active[i]) {
+    if (active[i]) {
+      --remaining;
+    } else {
       double fraction = INFINITY;
       if (step[i] > BOOP_BOUND_TOLERANCE && isfinite(model->upper[i]))
         fraction = (model->upper[i] - x[i]) / step[i];
@@ -317,6 +364,7 @@ static int blocking_bound(const double *x, const double *step,
   if (!isfinite(first) || first > 1.0 + BOOP_BOUND_TOLERANCE)
     return 0;
   int changed = 0;
+  double axes[BOOP_N][BOOP_N];
   for (int i = 0; i < BOOP_N; ++i)
     if (!active[i]) {
       double fraction = INFINITY;
@@ -324,12 +372,32 @@ static int blocking_bound(const double *x, const double *step,
         fraction = (model->upper[i] - x[i]) / step[i];
       if (step[i] < -BOOP_BOUND_TOLERANCE && isfinite(model->lower[i]))
         fraction = (model->lower[i] - x[i]) / step[i];
-      if (fabs(fraction - first) <=
+      if (remaining > 0 && fabs(fraction - first) <=
           BOOP_BOUND_TOLERANCE * fmax(1.0, fabs(first))) {
+        /* Count alone does not guarantee an independent working set. Reuse
+           the current factorization and orthogonalize tied bound normals. */
+        double normal[BOOP_N] = {0.0}, direction[BOOP_N];
+        normal[i] = 1.0;
+        project(work, model, normal, direction);
+        for (int j = 0; j < changed; ++j) {
+          double component = dot(BOOP_N, direction, axes[j]);
+          for (int k = 0; k < BOOP_N; ++k)
+            direction[k] -= component * axes[j][k];
+        }
+        double squared = dot(BOOP_N, direction, direction);
+        if (squared <= BOOP_ACTIVE_SET_INDEPENDENCE_TOLERANCE)
+          continue;
+        for (int k = 0; k < BOOP_N; ++k)
+          axes[changed][k] = direction[k] / sqrt(squared);
         active[i] = step[i] < 0.0 ? -1 : 1;
-        changed = 1;
+        --remaining;
+        ++changed;
       }
     }
+  /* A full working set cannot accept another bound. Keep the trial inside
+     the box instead of overconstraining the next equality factorization. */
+  if (!changed)
+    *fraction_limit = fmax(0.0, fmin(1.0, first));
   return changed;
 }
 
@@ -401,8 +469,12 @@ BoopStatus boop_solve(BoopWorkspace *work, const double *initial,
     status = linearize(work, &current);
     if (status)
       return status;
-    /* Working-set transitions consume an iteration without changing x. */
-    int removable = removable_bound(work, &current);
+    double restoration_multipliers[BOOP_N];
+    normal_step(work, &current, work->x, step.normal, restoration_multipliers);
+    double normal_length = norm(BOOP_N, step.normal);
+    /* Keep a face whose normal repair fits; releasing it can cause cycling. */
+    int removable = removable_bound(work, &current, restoration_multipliers,
+                                    normal_length <= trust);
     if (removable >= 0) {
       work->active[removable] = 0;
       record(diag, iteration, work, &current, &step, BOOP_ACTIVE_SET_UPDATE, 0,
@@ -410,8 +482,6 @@ BoopStatus boop_solve(BoopWorkspace *work, const double *initial,
       continue;
     }
     /* Walk normally first, then use the remaining radius tangentially. */
-    normal_step(work, &current, work->x, step.normal);
-    double normal_length = norm(BOOP_N, step.normal);
     if (normal_length > trust) {
       for (int i = 0; i < BOOP_N; ++i)
         step.normal[i] *= trust / normal_length;
@@ -424,15 +494,23 @@ BoopStatus boop_solve(BoopWorkspace *work, const double *initial,
         gradient_at_normal[row] +=
             current.hessian[row * BOOP_N + col] * step.normal[col];
     }
-    steihaug(work, &current, gradient_at_normal,
-             sqrt(fmax(0.0, trust * trust - normal_length * normal_length)),
-             &step);
+    double tangent_radius = sqrt(fmax(0.0, trust * trust - normal_length * normal_length));
+    if (restoring_working_face(work, &current))
+      tangent_radius = 0.0;
+    steihaug(work, &current, gradient_at_normal, tangent_radius, &step);
     for (int i = 0; i < BOOP_N; ++i)
       step.compound[i] = step.normal[i] + step.tangent[i];
-    if (blocking_bound(work->x, step.compound, &current, work->active)) {
+    double fraction_limit = 1.0;
+    if (blocking_bound(work->x, step.compound, &current, work,
+                       &fraction_limit)) {
       record(diag, iteration, work, &current, &step, BOOP_ACTIVE_SET_UPDATE, 0,
              trust);
       continue;
+    }
+    for (int i = 0; i < BOOP_N; ++i) {
+      step.normal[i] *= fraction_limit;
+      step.tangent[i] *= fraction_limit;
+      step.compound[i] *= fraction_limit;
     }
     /* Evaluate the fixed-cost SOC trial before the uncorrected BO trial. */
     double bo_x[BOOP_N];
@@ -451,8 +529,11 @@ BoopStatus boop_solve(BoopWorkspace *work, const double *initial,
     double chosen_step[BOOP_N] = {0.0};
 #if BOOP_NONLINEAR_EQUALITIES
     correction_step(work, &current, &bo, bo_x, trust, step.correction);
-    for (int i = 0; i < BOOP_N; ++i)
+    double correction_fraction = box_step_fraction(bo_x, step.correction, &current);
+    for (int i = 0; i < BOOP_N; ++i) {
+      step.correction[i] *= correction_fraction;
       soc_x[i] = bo_x[i] + step.correction[i];
+    }
     status = boop_evaluate(soc_x, parameters, work, &soc);
     if (status)
       return status;
