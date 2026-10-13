@@ -113,6 +113,14 @@ diagnostics are requested, it returns an extension-backed object whose
 individual histories are converted to Python lists only when their properties
 are accessed.
 
+JIT compilation uses setuptools' standard Python extension builder. It honors
+`CC`, `CPPFLAGS`, `CFLAGS`, `LDFLAGS`, and `LDSHARED` using the builder's normal
+precedence, without adding optimization or warning flags. For example,
+`CFLAGS="-O0 -g" python your_script.py` requests a debug build on GCC/Clang.
+Build settings are included in the cache key, so changing them rebuilds the
+extension. The compiler must support the generated C code (C11); select any
+required language-standard option through your toolchain's flags.
+
 Lookup tables are declared alongside scalar parameters. Their shapes are fixed
 when generating the solver; coordinates and samples are supplied at runtime:
 

@@ -2,9 +2,8 @@
 
 import hashlib
 import importlib.util
+import json
 import os
-import shlex
-import subprocess
 import sysconfig
 import tempfile
 from collections.abc import Sequence
@@ -13,6 +12,10 @@ from importlib import resources
 from pathlib import Path
 from types import ModuleType
 from typing import Any, Literal, Protocol, cast, overload
+
+import setuptools
+from setuptools import Distribution, Extension
+from setuptools.command.build_ext import build_ext
 
 from .c_codegen import GeneratedCCode, generate_c_solver
 from .model import NonlinearProgram
@@ -172,14 +175,23 @@ def _compile_extension(code: GeneratedCCode, cache_directory: str | Path | None)
 
 
 def _extension_key(code: GeneratedCCode, extension_template: str) -> str:
-    """Identify generated sources and the active Python extension ABI."""
+    """Identify sources, Python ABI, and the selected build configuration."""
     digest = hashlib.sha256()
     for name, content in sorted((*code.headers.items(), *code.sources.items())):
         digest.update(name.encode())
         digest.update(content.encode())
     digest.update(extension_template.encode())
     digest.update(str(sysconfig.get_config_var("SOABI")).encode())
-    digest.update(str(sysconfig.get_config_var("LDSHARED")).encode())
+    configuration = {
+        "python": sysconfig.get_config_vars(),
+        "setuptools": setuptools.__version__,
+        "environment": {name: os.environ.get(name) for name in (
+            "CC", "CPP", "CXX", "LDSHARED", "CFLAGS", "CPPFLAGS", "LDFLAGS",
+            "AR", "ARFLAGS", "PATH", "SDKROOT", "MACOSX_DEPLOYMENT_TARGET",
+            "ARCHFLAGS", "CL", "_CL_", "INCLUDE", "LIB", "LIBPATH",
+        )},
+    }
+    digest.update(json.dumps(configuration, sort_keys=True).encode())
     return digest.hexdigest()[:20]
 
 
@@ -189,44 +201,28 @@ def _build_extension(code: GeneratedCCode, template: str, module_name: str, buil
     code.write(build)
     extension = f'#define BOOP_MODULE_TOKEN {module_name}\n#define BOOP_MODULE_STRING "{module_name}"\n{template}'
     (build / "boop_extension.c").write_text(extension)
-    temporary_library = library.with_name(f"{library.name}.{os.getpid()}.tmp")
-
-    try:
-        subprocess.run(
-            _compiler_command(build, temporary_library),
-            check=True,
-            capture_output=True,
-            text=True,
+    # Each build gets its own objects and output, including concurrent builds
+    # of the same cache entry. Publish only a successfully linked extension.
+    with tempfile.TemporaryDirectory(prefix="build-", dir=build) as temporary:
+        temporary_build = Path(temporary)
+        code.write(temporary_build)
+        (temporary_build / "boop_extension.c").write_text(extension)
+        extension_module = Extension(
+            module_name,
+            sources=[str(temporary_build / name) for name in (
+                "boop_runtime.c", "boop_problem.c", "boop_extension.c",
+            )],
+            include_dirs=[str(temporary_build)],
+            libraries=[] if os.name == "nt" else ["m"],
         )
-    except subprocess.CalledProcessError as error:
-        message = f"C extension compilation failed:\n{error.stderr}"
-        raise RuntimeError(message) from error
-    temporary_library.replace(library)
-
-
-def _compiler_command(build: Path, output: Path) -> list[str]:
-    """Construct the platform-specific CPython extension compiler command."""
-    linker = shlex.split(cast(str, sysconfig.get_config_var("LDSHARED")))
-    python_include = cast(str, sysconfig.get_config_var("INCLUDEPY"))
-    return [
-        *linker,
-        "-std=c11",
-        "-O2",
-        "-Wall",
-        "-Wextra",
-        "-Werror",
-        "-fPIC",
-        "-I",
-        str(build),
-        "-I",
-        python_include,
-        str(build / "boop_runtime.c"),
-        str(build / "boop_problem.c"),
-        str(build / "boop_extension.c"),
-        "-lm",
-        "-o",
-        str(output),
-    ]
+        distribution = Distribution({"ext_modules": [extension_module]})
+        command = build_ext(distribution)
+        command.ensure_finalized()
+        command.build_lib = str(temporary_build / "lib")
+        command.build_temp = str(temporary_build / "objects")
+        command.force = True
+        command.run()
+        Path(command.get_ext_fullpath(module_name)).replace(library)
 
 
 def _load_extension(module_name: str, library: Path) -> ModuleType:
