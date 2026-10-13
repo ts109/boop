@@ -39,7 +39,7 @@ class GeneratedCCode:
         return self
 
 
-def generate_c_solver(nlp: NonlinearProgram, options: SolverOptions | None = None) -> GeneratedCCode:
+def generate_c_solver(nlp: NonlinearProgram, options: SolverOptions | None = None, *, share_subexpressions: bool = True) -> GeneratedCCode:
     """Generate portable C11 sources for an NLP-specific solver."""
     selected_options = options or SolverOptions()
     program = generate_program(nlp)
@@ -50,7 +50,7 @@ def generate_c_solver(nlp: NonlinearProgram, options: SolverOptions | None = Non
             "boop_runtime.h": runtime.joinpath("boop_runtime.h").read_text(),
         },
         sources={
-            "boop_problem.c": _problem_source(program),
+            "boop_problem.c": _problem_source(program, share_subexpressions=share_subexpressions),
             "boop_runtime.c": runtime.joinpath("boop_runtime.c").read_text(),
         },
     )
@@ -89,12 +89,12 @@ def _config_header(program: GeneratedProgram, options: SolverOptions) -> str:
 """
 
 
-def _problem_source(program: GeneratedProgram) -> str:
+def _problem_source(program: GeneratedProgram, *, share_subexpressions: bool = True) -> str:
     sections = (
         '#include "boop_runtime.h"',
         "#include <math.h>",
         _lut_source(program),
-        emit_evaluator(program),
+        emit_evaluator(program, share_subexpressions=share_subexpressions),
         emit_equality_linear_algebra(program),
     )
     return "\n\n".join(sections) + "\n"

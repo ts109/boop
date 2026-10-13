@@ -70,35 +70,35 @@ class EqualitySparsityIR:
 def analyze_equality_sparsity(jacobian: sympy.ImmutableDenseMatrix) -> EqualitySparsityIR:
     """Derive Gram assembly and LDL schedules from a Jacobian structure."""
     jacobian_pattern = _jacobian_pattern(jacobian)
-    gram_pattern = _gram_pattern(jacobian_pattern)
+    contributions = _gram_contributions(jacobian_pattern)
+    gram = [[False] * len(jacobian_pattern) for _ in jacobian_pattern]
+    for row, column, _ in contributions:
+        gram[row][column] = gram[column][row] = True
+    gram_pattern = tuple(tuple(row) for row in gram)
     permutation = _minimum_degree_order(gram_pattern)
     return EqualitySparsityIR(
         jacobian_pattern=jacobian_pattern,
-        gram_contributions=_gram_contributions(jacobian_pattern),
+        gram_contributions=contributions,
         ldl=_ldl_program(gram_pattern, permutation),
     )
 
 
 def _jacobian_pattern(jacobian: sympy.ImmutableDenseMatrix) -> BooleanPattern:
     rows, columns = jacobian.shape
-    return tuple(tuple(not (jacobian[row, column] == 0 or jacobian[row, column].is_zero is True) for column in range(columns)) for row in range(rows))
+    # Treat only literal zeros as absent. Assumption queries can recursively
+    # inspect large graphs; retaining an unproven zero is always safe.
+    return tuple(tuple(jacobian[row, column] != 0 for column in range(columns)) for row in range(rows))
 
 
 def _gram_contributions(jacobian: BooleanPattern) -> tuple[GramContribution, ...]:
+    supports = [{index for index, present in enumerate(row) if present} for row in jacobian]
     contributions = []
-    for row, left in enumerate(jacobian):
-        for column, right in enumerate(jacobian[: row + 1]):
-            shared = tuple(index for index, pair in enumerate(zip(left, right, strict=True)) if all(pair))
+    for row, left in enumerate(supports):
+        for column in range(row + 1):
+            shared = tuple(sorted(left & supports[column]))
             if row == column or shared:
                 contributions.append((row, column, shared))
     return tuple(contributions)
-
-
-def _gram_pattern(jacobian: BooleanPattern) -> BooleanPattern:
-    return tuple(
-        tuple(row == column or any(left and right for left, right in zip(jacobian[row], jacobian[column], strict=True)) for column in range(len(jacobian)))
-        for row in range(len(jacobian))
-    )
 
 
 def _minimum_degree_order(pattern: BooleanPattern) -> tuple[int, ...]:

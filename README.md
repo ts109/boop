@@ -190,3 +190,15 @@ multipliers can release obstructing reached bounds. A repair that fits keeps
 its working face, avoiding release/reactivation cycles. These iterations
 share the same SQP budget. Second-order corrections are shortened at box
 boundaries before evaluation instead of being discarded for crossing them.
+
+Code generation uses exact repeated-subtree sharing by default. It performs no
+symbolic simplification, expansion, factoring, or algebraic CSE. Derivatives
+are computed with `simplify=False`; SymPy's ordinary expression construction
+and derivative rules still apply. To compare generation and execution costs,
+pass `share_subexpressions=False` to either `generate_c_solver` or
+`create_compiled_solver`. Disabling sharing can increase generated source size,
+compiler work, and repeated calculations at runtime.
+
+See [the code-generation performance audit](docs/codegen-performance.md) for
+measurements, remaining bottlenecks, and compilation/runtime tradeoffs. The
+reproducible sparse MPC benchmark is `benchmarks/codegen.py`.

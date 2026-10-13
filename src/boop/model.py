@@ -51,7 +51,7 @@ class NonlinearProgram:
             raise ValueError(message)
 
         for lower, upper in zip(lower_bounds, upper_bounds, strict=True):
-            difference = sympy.simplify(upper - lower)
+            difference = upper - lower
 
             if difference.is_negative:
                 message = "a lower bound is greater than its upper bound"

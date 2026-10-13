@@ -152,9 +152,9 @@ class CompiledSolver:
         return CompiledSolverResult(cast(list[float], solution), cast(NativeSolverDiagnostics, native_diagnostics))
 
 
-def create_compiled_solver(nlp: NonlinearProgram, options: SolverOptions | None = None, *, cache_directory: str | Path | None = None) -> CompiledSolver:
+def create_compiled_solver(nlp: NonlinearProgram, options: SolverOptions | None = None, *, cache_directory: str | Path | None = None, share_subexpressions: bool = True) -> CompiledSolver:
     """Generate, compile, load, and instantiate a native solver extension."""
-    code = generate_c_solver(nlp, options)
+    code = generate_c_solver(nlp, options, share_subexpressions=share_subexpressions)
     module = _compile_extension(code, cache_directory)
     native_type = cast(Any, module).Solver
     return CompiledSolver(cast(_NativeSolver, native_type()))

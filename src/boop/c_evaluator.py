@@ -7,25 +7,65 @@ from .lut import LUTCall
 from .program import GeneratedProgram
 
 
-def emit_evaluator(program: GeneratedProgram) -> str:
+def emit_evaluator(program: GeneratedProgram, *, share_subexpressions: bool = True) -> str:
     """Emit objective, constraint, bound, and derivative assignments."""
     nlp = program.nlp
     variables = sympy.symbols(f"boop_x_0:{nlp.dimension}")
     parameters = sympy.symbols(f"boop_parameter_0:{len(nlp.parameters)}")
-    substitutions = dict(zip((*nlp.x, *nlp.parameters), (*variables, *parameters), strict=True))
-    substitutions.update((table.identity, sympy.Integer(index)) for index, table in enumerate(nlp.luts))
-    expressions = [expression.xreplace(substitutions) for expression in _flatten_evaluator(program)]
-    replacements, reduced = sympy.cse(expressions, symbols=sympy.numbered_symbols("temporary_"))
+    assignments = [
+        (target, expression)
+        for target, expression in zip(_evaluator_targets(program), _flatten_evaluator(program), strict=True)
+        if expression != 0 or not target.startswith(("model->hessian[", "model->jacobian["))
+    ]
+    expressions = [expression for _, expression in assignments]
+    printer = _Printer()
+    printer.references = dict(zip((*nlp.x, *nlp.parameters), map(str, (*variables, *parameters)), strict=True))
+    printer.lut_indices = {table.identity: index for index, table in enumerate(nlp.luts)}
 
     lines = ["BoopStatus boop_evaluate(const double *x, const double *parameters, const BoopWorkspace *workspace, BoopModel *model) {"]
     lines.extend(("  (void)x;", "  (void)parameters;", "  (void)workspace;"))
+    lines.extend((
+        "  for (int i = 0; i < BOOP_N * BOOP_N; ++i) model->hessian[i] = 0.0;",
+        "  for (int i = 0; i < BOOP_M * BOOP_N; ++i) model->jacobian[i] = 0.0;",
+    ))
     lines.extend(f"  const double {symbol} = x[{index}];" for index, symbol in enumerate(variables))
     lines.extend(f"  const double {symbol} = parameters[{index}];" for index, symbol in enumerate(parameters))
-    lines.extend(f"  const double {symbol} = {_ccode(expression)};" for symbol, expression in replacements)
-    lines.extend(f"  {target} = {_ccode(expression)};" for target, expression in zip(_evaluator_targets(program), reduced, strict=True))
+    if share_subexpressions:
+        for index, expression in enumerate(_shared_subexpressions(expressions)):
+            name = f"temporary_{index}"
+            lines.append(f"  const double {name} = {printer.doprint(expression)};")
+            printer.references[expression] = name
+    lines.extend(f"  {target} = {printer.doprint(expression)};" for target, expression in assignments)
     lines.extend(_finite_checks())
     lines.extend(("  return BOOP_OK;", "}"))
     return "\n".join(lines)
+
+
+def _shared_subexpressions(expressions: list[sympy.Expr]) -> list[sympy.Expr]:
+    """Find exact repeated DAG nodes in dependency order without rewriting.
+
+    Visit each distinct node once, counting incoming edges and output uses.
+    Unlike algebraic CSE this does not factor, expand, or rebuild expressions.
+    """
+    counts: dict[sympy.Basic, int] = {}
+    visited: set[sympy.Basic] = set()
+    ordered: list[sympy.Basic] = []
+    for root in expressions:
+        counts[root] = counts.get(root, 0) + 1
+        stack = [(root, False)]
+        while stack:
+            node, exiting = stack.pop()
+            if exiting:
+                ordered.append(node)
+            elif node not in visited:
+                visited.add(node)
+                stack.append((node, True))
+                # Branch-local work must retain conditional evaluation.
+                children = () if isinstance(node, sympy.Piecewise) else node.args
+                for child in reversed(children):
+                    counts[child] = counts.get(child, 0) + 1
+                    stack.append((child, False))
+    return [node for node in ordered if isinstance(node, sympy.Expr) and node.args and counts[node] > 1]
 
 
 def _flatten_evaluator(program: GeneratedProgram) -> list[sympy.Expr]:
@@ -65,6 +105,17 @@ def _finite_checks() -> tuple[str, ...]:
 
 
 class _Printer(C99CodePrinter):
+    def __init__(self) -> None:
+        super().__init__({"order": "none"})
+        self.references: dict[sympy.Basic, str] = {}
+        self.lut_indices: dict[sympy.Basic, int] = {}
+
+    def _print(self, expression: sympy.Basic, **kwargs: object) -> str:
+        reference = self.references.get(expression)
+        if reference is not None:
+            return reference
+        return super()._print(expression, **kwargs)
+
     def _print_LUTCall(self, expression: LUTCall) -> str:  # noqa: N802
         identity, dx, dy, *queries = expression.args
         orders = (dx, dy)
@@ -72,8 +123,4 @@ class _Printer(C99CodePrinter):
             message = "LUT derivatives above total order two are unsupported"
             raise ValueError(message)
         x, y = (*queries, sympy.Integer(0))[:2]
-        return f"boop_lut_eval(workspace, {identity}, {dx}, {dy}, {self._print(x)}, {self._print(y)})"
-
-
-def _ccode(expression: sympy.Expr) -> str:
-    return _Printer().doprint(expression)
+        return f"boop_lut_eval(workspace, {self.lut_indices[identity]}, {dx}, {dy}, {self._print(x)}, {self._print(y)})"

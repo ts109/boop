@@ -36,15 +36,35 @@ class EvaluatorIR:
 
 def build_evaluator_ir(nlp: NonlinearProgram) -> EvaluatorIR:
     """Differentiate an NLP into the expressions needed by the C runtime."""
-    variables = sympy.ImmutableDenseMatrix(nlp.x)
     equalities = sympy.ImmutableDenseMatrix(nlp.g)
-    jacobian = equalities.jacobian(variables) if nlp.g else sympy.zeros(0, nlp.dimension)
+    # Cache symbol dependencies per expression, including repeated stage terms.
+    dependencies: dict[sympy.Expr, set[sympy.Symbol]] = {}
+
+    def derivative(expression: sympy.Expr, variable: sympy.Symbol) -> sympy.Expr:
+        if expression not in dependencies:
+            dependencies[expression] = expression.free_symbols
+        if variable not in dependencies[expression]:
+            return sympy.S.Zero
+        return sympy.diff(expression, variable, simplify=False)
+
+    gradient = [derivative(nlp.f, variable) for variable in nlp.x]
+    # Reuse first derivatives and symmetry; never differentiate the full
+    # objective a second time or request mixed-derivative simplification.
+    hessian = [[sympy.S.Zero] * nlp.dimension for _ in nlp.x]
+    for row, first in enumerate(gradient):
+        for column in range(row, nlp.dimension):
+            entry = derivative(first, nlp.x[column])
+            hessian[row][column] = hessian[column][row] = entry
+    jacobian = sympy.ImmutableDenseMatrix(
+        len(nlp.g), nlp.dimension,
+        [derivative(expression, variable) for expression in nlp.g for variable in nlp.x],
+    )
 
     return EvaluatorIR(
         objective=nlp.f,
         equalities=equalities,
-        gradient=sympy.ImmutableDenseMatrix([sympy.diff(nlp.f, variable) for variable in nlp.x]),
-        hessian=sympy.ImmutableDenseMatrix(sympy.hessian(nlp.f, nlp.x)),
+        gradient=sympy.ImmutableDenseMatrix(gradient),
+        hessian=sympy.ImmutableDenseMatrix(nlp.dimension, nlp.dimension, [entry for row in hessian for entry in row]),
         equality_jacobian=sympy.ImmutableDenseMatrix(jacobian),
         lower_bounds=sympy.ImmutableDenseMatrix(nlp.lb),
         upper_bounds=sympy.ImmutableDenseMatrix(nlp.ub),
